@@ -20,7 +20,9 @@ plugins:
       usage-scope: fable
       block-on-unknown: true
       cutoff-percent-used: 75
-      poll-interval: 1m
+      near-cutoff-percent-used: 70
+      poll-interval: 5m
+      near-cutoff-poll-interval: 1m
       request-timeout: 10s
 ```
 
@@ -39,14 +41,16 @@ Published releases include Darwin (`amd64`, `arm64`), Linux (`amd64`, `arm64`), 
 | `usage-scope` | `seven_day` | `seven_day` for the overall weekly meter, or a model display name such as `fable` for its `weekly_scoped` meter. |
 | `block-on-unknown` | `false` | When true, a protected account is unavailable while its selected quota is missing, expired, or older than `poll-interval`. |
 | `cutoff-percent-used` | `50` | Blocks a protected account at or above this utilization percentage for the selected scope. A cutoff of 75 reserves the final 25%. |
-| `poll-interval` | `5m` | Minimum cache age before a protected request queues another asynchronous refresh. |
+| `near-cutoff-percent-used` | disabled | Optional utilization threshold that switches to the shorter near-cutoff polling interval. Must be below the cutoff. |
+| `poll-interval` | `5m` | Minimum cache age below the near-cutoff threshold. |
+| `near-cutoff-poll-interval` | `1m` | Minimum cache age at or above the near-cutoff threshold. |
 | `request-timeout` | `10s` | Timeout for the provider usage request, expressed as a Go duration. |
 
 ## Behavior
 
 - Refreshes enabled physical Claude OAuth credentials when the worker starts; startup reconfiguration retries discovery only while the cache is empty. There is no time-driven polling.
 - With `protected-accounts` configured, native CLIProxyAPI scheduling is preserved while those accounts are eligible. If a protected account must be withheld, the plugin selects the highest-priority remaining candidate.
-- A protected-model request queues one asynchronous refresh for a protected account whose cached usage is at least `poll-interval` old. With `block-on-unknown: true`, that account is withheld while the refresh is pending.
+- A protected-model request queues one asynchronous refresh when cached usage reaches the applicable normal or near-cutoff age. With `block-on-unknown: true`, that account is withheld while the refresh is pending.
 - Coalesces concurrent refreshes, and does not refresh a known blocked account again before its reported reset time.
 - A rejection-only design cannot enforce a pre-exhaustion cutoff: the rejection arrives only after the hard limit is reached.
 - Applies only to exact, case-insensitive `protected-models` matches.

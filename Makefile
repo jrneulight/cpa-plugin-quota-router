@@ -1,5 +1,5 @@
 PLUGIN_NAME ?= quota-router
-VERSION ?= 0.6.0
+VERSION ?= 0.6.1
 BUILD_DIR ?= dist
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)

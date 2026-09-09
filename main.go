@@ -8,6 +8,7 @@ const (
 	defaultProtectedModel    = "claude-fable-5"
 	defaultUsageScope        = "seven_day"
 	defaultPollInterval      = 5 * time.Minute
+	defaultNearPollInterval  = time.Minute
 	defaultRequestTimeout    = 10 * time.Second
 	defaultUsageEndpoint     = "https://api.anthropic.com/api/oauth/usage"
 	anthropicOAuthBeta       = "oauth-2025-04-20"
@@ -32,7 +33,9 @@ const (
 	pollErrorRead            = "read_error"
 )
 
-var pluginVersion = "0.6.0"
+const disabledNearCutoffPercent = -1.0
+
+var pluginVersion = "0.6.1"
 
 // Variable only so the C-shared integration test can inject a local fixture.
 var usageEndpoint = defaultUsageEndpoint

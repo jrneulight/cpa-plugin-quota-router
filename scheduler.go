@@ -118,7 +118,7 @@ func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Sche
 		protected := candidateMatchesProtectedAccount(candidate, sample, cfg.ProtectedAccounts)
 		blocked := false
 		if protected {
-			fresh := sample.fresh(now, cfg.PollInterval, cfg.UsageScope)
+			fresh := sample.fresh(now, cfg.refreshInterval(sample), cfg.UsageScope)
 			if !fresh && len(cfg.ProtectedAccounts) > 0 {
 				r.queueCandidateRefresh(candidate.ID, cfg, now)
 			}
@@ -182,13 +182,16 @@ func (r *pluginRuntime) handleManagement(req pluginapi.ManagementRequest) plugin
 	}
 	cfg := r.loadedConfig()
 	body, _ := json.Marshal(cutoffStatusResponse{
-		Enabled:           cfg.Enabled,
-		CutoffPercentUsed: cfg.CutoffPercentUsed,
-		ProtectedModels:   cfg.ProtectedModels,
-		ProtectedAccounts: cfg.ProtectedAccounts,
-		UsageScope:        cfg.UsageScope,
-		BlockOnUnknown:    cfg.BlockOnUnknown,
-		Accounts:          r.cache.statuses(r.now(), cfg),
+		Enabled:                cfg.Enabled,
+		CutoffPercentUsed:      cfg.CutoffPercentUsed,
+		NearCutoffPercentUsed:  cfg.NearCutoffPercent,
+		PollInterval:           cfg.PollInterval.String(),
+		NearCutoffPollInterval: cfg.NearPollInterval.String(),
+		ProtectedModels:        cfg.ProtectedModels,
+		ProtectedAccounts:      cfg.ProtectedAccounts,
+		UsageScope:             cfg.UsageScope,
+		BlockOnUnknown:         cfg.BlockOnUnknown,
+		Accounts:               r.cache.statuses(r.now(), cfg),
 	})
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,

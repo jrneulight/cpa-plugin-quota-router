@@ -664,6 +664,40 @@ func TestProtectedAccountSelectorDoesNotAffectOtherClaudeAccounts(t *testing.T) 
 	}
 }
 
+func TestAdaptiveRefreshTightensAtNearCutoffBoundary(t *testing.T) {
+	now := time.Now().UTC()
+	runtime := newTestRuntime(&fakeHost{}, nil, now)
+	runtime.cache.reconcile([]physicalClaudeAuth{{ID: "dad", AuthIndex: "dad-index", Email: "dad@example.com"}})
+	cfg := defaultPluginConfig()
+	cfg.ProtectedAccounts = []string{"dad@example.com"}
+	cfg.UsageScope = "fable"
+	cfg.BlockOnUnknown = true
+	cfg.CutoffPercentUsed = 75
+	cfg.NearCutoffPercent = 70
+	cfg.PollInterval = 5 * time.Minute
+	cfg.NearPollInterval = time.Minute
+	runtime.config.Store(&cfg)
+
+	request := claudeRequest(candidate("dad", -50), candidate("bedrock", -100))
+	runtime.cache.recordSuccessScope("dad", "fable", 69.9, now.Add(time.Hour), now.Add(-2*time.Minute))
+	response, decisionError := runtime.pick(request)
+	if decisionError != nil || response.Handled {
+		t.Fatalf("below 70%% should use five-minute freshness: response=%#v error=%#v", response, decisionError)
+	}
+
+	runtime.cache.recordSuccessScope("dad", "fable", 70, now.Add(time.Hour), now.Add(-2*time.Minute))
+	response, decisionError = runtime.pick(request)
+	if decisionError != nil || !response.Handled || response.AuthID != "bedrock" {
+		t.Fatalf("at 70%% a two-minute sample should be stale: response=%#v error=%#v", response, decisionError)
+	}
+
+	runtime.cache.recordSuccessScope("dad", "fable", 70, now.Add(time.Hour), now.Add(-30*time.Second))
+	response, decisionError = runtime.pick(request)
+	if decisionError != nil || response.Handled {
+		t.Fatalf("at 70%% a 30-second sample should remain fresh: response=%#v error=%#v", response, decisionError)
+	}
+}
+
 func TestOnlySelectedProtectedAccountIsPolled(t *testing.T) {
 	now := time.Now().UTC()
 	dadEntry := physicalEntry("dad", "dad-index")
@@ -1186,7 +1220,7 @@ func TestManagementStatusRouteExposesOnlySchedulerState(t *testing.T) {
 		t.Fatalf("raw accounts = %#v", rawStatus["accounts"])
 	}
 	allowedKeys := map[string]bool{
-		"id": true, "auth_index": true, "name": true, "email": true, "protected": true, "usage_scope": true, "known": true, "fresh": true, "blocked": true,
+		"id": true, "auth_index": true, "name": true, "email": true, "protected": true, "usage_scope": true, "refresh_interval": true, "known": true, "fresh": true, "blocked": true,
 		"weekly_percent_used": true, "sampled_at": true, "reset_at": true, "last_error_category": true,
 	}
 	for _, rawAccount := range rawAccounts {
@@ -1238,7 +1272,7 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 	enabled := true
 	cutoff := 42.5
 	raw, errMarshal := json.Marshal(lifecycleRequest{ConfigYAML: []byte(
-		"enabled: true\nprotected-models: [claude-sonnet-4-6, CLAUDE-FABLE-5, claude-sonnet-4-6]\nprotected-accounts: [Dad@Example.com, claude-dad.json]\nusage-scope: Fable\nblock-on-unknown: true\ncutoff-percent-used: 42.5\npoll-interval: 30s\nrequest-timeout: 2s\n",
+		"enabled: true\nprotected-models: [claude-sonnet-4-6, CLAUDE-FABLE-5, claude-sonnet-4-6]\nprotected-accounts: [Dad@Example.com, claude-dad.json]\nusage-scope: Fable\nblock-on-unknown: true\ncutoff-percent-used: 42.5\nnear-cutoff-percent-used: 40\npoll-interval: 30s\nnear-cutoff-poll-interval: 10s\nrequest-timeout: 2s\n",
 	)})
 	if errMarshal != nil {
 		t.Fatal(errMarshal)
@@ -1247,7 +1281,7 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 	if errConfig != nil {
 		t.Fatal(errConfig)
 	}
-	if cfg.Enabled != enabled || strings.Join(cfg.ProtectedModels, ",") != "claude-fable-5,claude-sonnet-4-6" || strings.Join(cfg.ProtectedAccounts, ",") != "claude-dad.json,dad@example.com" || cfg.UsageScope != "fable" || !cfg.BlockOnUnknown || cfg.CutoffPercentUsed != cutoff || cfg.PollInterval != 30*time.Second || cfg.RequestTimeout != 2*time.Second {
+	if cfg.Enabled != enabled || strings.Join(cfg.ProtectedModels, ",") != "claude-fable-5,claude-sonnet-4-6" || strings.Join(cfg.ProtectedAccounts, ",") != "claude-dad.json,dad@example.com" || cfg.UsageScope != "fable" || !cfg.BlockOnUnknown || cfg.CutoffPercentUsed != cutoff || cfg.NearCutoffPercent != 40 || cfg.PollInterval != 30*time.Second || cfg.NearPollInterval != 10*time.Second || cfg.RequestTimeout != 2*time.Second {
 		t.Fatalf("config = %#v", cfg)
 	}
 	defaults, errDefaults := decodeLifecycleConfig([]byte("{}"))
@@ -1262,6 +1296,9 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 		"cutoff-percent-used: 101\n",
 		"cutoff-percent-used: -1\n",
 		"poll-interval: 0s\n",
+		"cutoff-percent-used: 75\nnear-cutoff-percent-used: 75\n",
+		"cutoff-percent-used: 75\nnear-cutoff-percent-used: 70\npoll-interval: 1m\nnear-cutoff-poll-interval: 2m\n",
+		"near-cutoff-poll-interval: nope\n",
 		"request-timeout: nope\n",
 	} {
 		raw, _ := json.Marshal(lifecycleRequest{ConfigYAML: []byte(configYAML)})
@@ -1288,6 +1325,8 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 		fields["block-on-unknown"] != pluginapi.ConfigFieldTypeBoolean ||
 		fields["cutoff-percent-used"] != pluginapi.ConfigFieldTypeNumber ||
 		fields["poll-interval"] != pluginapi.ConfigFieldTypeString ||
+		fields["near-cutoff-percent-used"] != pluginapi.ConfigFieldTypeNumber ||
+		fields["near-cutoff-poll-interval"] != pluginapi.ConfigFieldTypeString ||
 		fields["request-timeout"] != pluginapi.ConfigFieldTypeString {
 		t.Fatalf("config fields = %#v", fields)
 	}

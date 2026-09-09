@@ -25,7 +25,9 @@ type rawPluginConfig struct {
 	UsageScope        string    `yaml:"usage-scope"`
 	BlockOnUnknown    *bool     `yaml:"block-on-unknown"`
 	CutoffPercentUsed *float64  `yaml:"cutoff-percent-used"`
+	NearCutoffPercent *float64  `yaml:"near-cutoff-percent-used"`
 	PollInterval      string    `yaml:"poll-interval"`
+	NearPollInterval  string    `yaml:"near-cutoff-poll-interval"`
 	RequestTimeout    string    `yaml:"request-timeout"`
 }
 
@@ -36,7 +38,9 @@ type pluginConfig struct {
 	UsageScope        string
 	BlockOnUnknown    bool
 	CutoffPercentUsed float64
+	NearCutoffPercent float64
 	PollInterval      time.Duration
+	NearPollInterval  time.Duration
 	RequestTimeout    time.Duration
 }
 
@@ -66,7 +70,9 @@ func defaultPluginConfig() pluginConfig {
 		ProtectedModels:   []string{defaultProtectedModel},
 		UsageScope:        defaultUsageScope,
 		CutoffPercentUsed: defaultCutoffPercentUsed,
+		NearCutoffPercent: disabledNearCutoffPercent,
 		PollInterval:      defaultPollInterval,
+		NearPollInterval:  defaultNearPollInterval,
 		RequestTimeout:    defaultRequestTimeout,
 	}
 }
@@ -112,12 +118,22 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 	if decoded.CutoffPercentUsed != nil {
 		cfg.CutoffPercentUsed = *decoded.CutoffPercentUsed
 	}
+	if decoded.NearCutoffPercent != nil {
+		cfg.NearCutoffPercent = *decoded.NearCutoffPercent
+	}
 	if value := strings.TrimSpace(decoded.PollInterval); value != "" {
 		interval, err := time.ParseDuration(value)
 		if err != nil {
 			return pluginConfig{}, fmt.Errorf("poll-interval must be a Go duration")
 		}
 		cfg.PollInterval = interval
+	}
+	if value := strings.TrimSpace(decoded.NearPollInterval); value != "" {
+		interval, err := time.ParseDuration(value)
+		if err != nil {
+			return pluginConfig{}, fmt.Errorf("near-cutoff-poll-interval must be a Go duration")
+		}
+		cfg.NearPollInterval = interval
 	}
 	if value := strings.TrimSpace(decoded.RequestTimeout); value != "" {
 		timeout, err := time.ParseDuration(value)
@@ -132,6 +148,14 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 	if cfg.PollInterval <= 0 {
 		return pluginConfig{}, fmt.Errorf("poll-interval must be greater than zero")
 	}
+	if cfg.NearCutoffPercent != disabledNearCutoffPercent {
+		if math.IsNaN(cfg.NearCutoffPercent) || math.IsInf(cfg.NearCutoffPercent, 0) || cfg.NearCutoffPercent < 0 || cfg.NearCutoffPercent >= cfg.CutoffPercentUsed {
+			return pluginConfig{}, fmt.Errorf("near-cutoff-percent-used must be below cutoff-percent-used")
+		}
+		if cfg.NearPollInterval <= 0 || cfg.NearPollInterval > cfg.PollInterval {
+			return pluginConfig{}, fmt.Errorf("near-cutoff-poll-interval must be greater than zero and no longer than poll-interval")
+		}
+	}
 	if cfg.RequestTimeout <= 0 {
 		return pluginConfig{}, fmt.Errorf("request-timeout must be greater than zero")
 	}
@@ -139,6 +163,15 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 		return pluginConfig{}, fmt.Errorf("usage-scope must not be empty")
 	}
 	return cfg, nil
+}
+
+func (cfg pluginConfig) refreshInterval(sample quotaSample) time.Duration {
+	if cfg.NearCutoffPercent != disabledNearCutoffPercent &&
+		sample.HasSample && strings.EqualFold(sample.UsageScope, cfg.UsageScope) &&
+		sample.WeeklyPercentUsed >= cfg.NearCutoffPercent {
+		return cfg.NearPollInterval
+	}
+	return cfg.PollInterval
 }
 
 func normalizeProtectedAccounts(accounts []string) ([]string, error) {
@@ -224,7 +257,17 @@ func pluginRegistration() registration {
 				{
 					Name:        "poll-interval",
 					Type:        pluginapi.ConfigFieldTypeString,
-					Description: "Minimum cached-usage age before a protected-model request queues another refresh. Default: 5m.",
+					Description: "Minimum cached-usage age below the near-cutoff threshold. Default: 5m.",
+				},
+				{
+					Name:        "near-cutoff-percent-used",
+					Type:        pluginapi.ConfigFieldTypeNumber,
+					Description: "Optional utilization threshold that switches to the shorter near-cutoff polling interval.",
+				},
+				{
+					Name:        "near-cutoff-poll-interval",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "Minimum cached-usage age at or above near-cutoff-percent-used. Default: 1m.",
 				},
 				{
 					Name:        "request-timeout",

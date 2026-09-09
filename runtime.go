@@ -79,6 +79,8 @@ func (r *pluginRuntime) applyConfig(cfg pluginConfig) {
 			"usage_scope":         cfg.UsageScope,
 			"block_on_unknown":    cfg.BlockOnUnknown,
 			"minimum_refresh_age": cfg.PollInterval.String(),
+			"near_cutoff_percent": cfg.NearCutoffPercent,
+			"near_refresh_age":    cfg.NearPollInterval.String(),
 			"request_timeout":     cfg.RequestTimeout.String(),
 		})
 		return
@@ -93,6 +95,8 @@ func (r *pluginRuntime) applyConfig(cfg pluginConfig) {
 		"usage_scope":         cfg.UsageScope,
 		"block_on_unknown":    cfg.BlockOnUnknown,
 		"minimum_refresh_age": cfg.PollInterval.String(),
+		"near_cutoff_percent": cfg.NearCutoffPercent,
+		"near_refresh_age":    cfg.NearPollInterval.String(),
 		"request_timeout":     cfg.RequestTimeout.String(),
 	})
 }
@@ -184,7 +188,8 @@ func (r *pluginRuntime) queueCandidateRefresh(authID string, cfg pluginConfig, n
 		r.refreshMu.Unlock()
 		return
 	}
-	if !r.cache.claimRefresh(authID, now, cfg.CutoffPercentUsed, cfg.PollInterval, cfg.UsageScope) {
+	minimumAge := cfg.refreshInterval(r.cache.snapshot(authID))
+	if !r.cache.claimRefresh(authID, now, cfg.CutoffPercentUsed, minimumAge, cfg.UsageScope) {
 		r.refreshMu.Unlock()
 		return
 	}

@@ -8,13 +8,16 @@ import (
 )
 
 type cutoffStatusResponse struct {
-	Enabled           bool                  `json:"enabled"`
-	ProtectedModels   []string              `json:"protected_models"`
-	CutoffPercentUsed float64               `json:"cutoff_percent_used"`
-	ProtectedAccounts []string              `json:"protected_accounts,omitempty"`
-	UsageScope        string                `json:"usage_scope"`
-	BlockOnUnknown    bool                  `json:"block_on_unknown"`
-	Accounts          []cutoffAccountStatus `json:"accounts"`
+	Enabled                bool                  `json:"enabled"`
+	ProtectedModels        []string              `json:"protected_models"`
+	CutoffPercentUsed      float64               `json:"cutoff_percent_used"`
+	NearCutoffPercentUsed  float64               `json:"near_cutoff_percent_used"`
+	PollInterval           string                `json:"poll_interval"`
+	NearCutoffPollInterval string                `json:"near_cutoff_poll_interval"`
+	ProtectedAccounts      []string              `json:"protected_accounts,omitempty"`
+	UsageScope             string                `json:"usage_scope"`
+	BlockOnUnknown         bool                  `json:"block_on_unknown"`
+	Accounts               []cutoffAccountStatus `json:"accounts"`
 }
 
 type cutoffAccountStatus struct {
@@ -28,6 +31,7 @@ type cutoffAccountStatus struct {
 	Blocked           bool     `json:"blocked"`
 	WeeklyPercentUsed *float64 `json:"weekly_percent_used,omitempty"`
 	UsageScope        string   `json:"usage_scope,omitempty"`
+	RefreshInterval   string   `json:"refresh_interval,omitempty"`
 	SampledAt         string   `json:"sampled_at,omitempty"`
 	ResetAt           string   `json:"reset_at,omitempty"`
 	LastErrorCategory string   `json:"last_error_category,omitempty"`
@@ -193,7 +197,8 @@ func (c *quotaCache) statuses(now time.Time, cfg pluginConfig) []cutoffAccountSt
 	for authID, sample := range c.samples {
 		known := sample.known(now) && strings.EqualFold(sample.UsageScope, cfg.UsageScope)
 		protected := matchesProtectedAccount(physicalClaudeAuth{ID: authID, AuthIndex: sample.AuthIndex, Name: sample.Name, Email: sample.Email, Account: sample.Account}, cfg.ProtectedAccounts)
-		fresh := sample.fresh(now, cfg.PollInterval, cfg.UsageScope)
+		refreshInterval := cfg.refreshInterval(sample)
+		fresh := sample.fresh(now, refreshInterval, cfg.UsageScope)
 		account := cutoffAccountStatus{
 			ID:                authID,
 			AuthIndex:         sample.AuthIndex,
@@ -204,6 +209,7 @@ func (c *quotaCache) statuses(now time.Time, cfg pluginConfig) []cutoffAccountSt
 			Fresh:             fresh,
 			Blocked:           sample.blocked(now, cfg.CutoffPercentUsed, cfg.UsageScope) || (protected && cfg.BlockOnUnknown && !fresh),
 			UsageScope:        sample.UsageScope,
+			RefreshInterval:   refreshInterval.String(),
 			LastErrorCategory: sample.LastErrorCategory,
 		}
 		if known {
