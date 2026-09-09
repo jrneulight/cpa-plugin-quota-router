@@ -1,12 +1,12 @@
 # CLIProxyAPI Quota Router
 
-Quota-aware account routing for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The plugin routes configured protected models away from OAuth accounts when provider usage reaches a configurable cutoff, while leaving other models on CLIProxyAPI's native scheduler. It supports Anthropic's overall seven-day quota and model-specific `weekly_scoped` limits such as Fable.
+Quota-aware account routing for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). The plugin routes configured protected models away from OAuth accounts when provider usage reaches a configurable cutoff, while leaving other models on CLIProxyAPI's native scheduler. It supports Anthropic's overall seven-day quota and model-specific `weekly_scoped` limits such as Fable. An optional Bedrock compatibility interceptor also makes Claude Code requests safe for an Amazon Bedrock fallback after that fallback has been selected.
 
 The default specifically protects `claude-fable-5` at 50%. This matches Anthropic's [June 30 redeployment announcement](https://www.anthropic.com/news/redeploying-fable-5), which included Fable 5 for up to 50% of weekly usage through July 7, 2026; Anthropic said access would use usage credits afterward, so both the model and cutoff remain configurable.
 
 ## Install
 
-Download the archive for your platform from [Releases](https://github.com/Smarty-Pants-Inc/cpa-plugin-quota-router/releases), extract the library into CLIProxyAPI's plugin directory, and configure it by plugin ID:
+Download the archive for your platform from [this fork's Releases](https://github.com/jrneulight/cpa-plugin-quota-router/releases), extract the library into CLIProxyAPI's plugin directory, and configure it by plugin ID:
 
 ```yaml
 plugins:
@@ -24,6 +24,7 @@ plugins:
       poll-interval: 5m
       near-cutoff-poll-interval: 1m
       request-timeout: 10s
+      bedrock-compat: true
 ```
 
 The library basename must be `quota-router` or a semver-suffixed form such as `quota-router-v0.5.0`, with `.dylib`, `.so`, or `.dll` for the host platform.
@@ -45,6 +46,7 @@ Published releases include Darwin (`amd64`, `arm64`), Linux (`amd64`, `arm64`), 
 | `poll-interval` | `5m` | Minimum cache age below the near-cutoff threshold. |
 | `near-cutoff-poll-interval` | `1m` | Minimum cache age at or above the near-cutoff threshold. |
 | `request-timeout` | `10s` | Timeout for the provider usage request, expressed as a Go duration. |
+| `bedrock-compat` | `false` | After a Bedrock Claude model is selected, removes Claude-native metadata, unsupported beta flags, and unsupported advisor/tool-search features. Native Claude OAuth requests are unchanged. |
 
 ## Behavior
 
@@ -56,6 +58,7 @@ Published releases include Darwin (`amd64`, `arm64`), Linux (`amd64`, `arm64`), 
 - Applies only to exact, case-insensitive `protected-models` matches.
 - Blocks an account at or above `cutoff-percent-used`; unknown or reset-expired quota state follows `block-on-unknown` while a refresh is queued.
 - Never changes auth files or CLIProxyAPI's permanent disabled state.
+- With `bedrock-compat: true`, request rewriting runs only after the selected upstream model has an Amazon Bedrock Anthropic prefix (`anthropic.`, `us.anthropic.`, `global.anthropic.`, `eu.anthropic.`, or `apac.anthropic.`). It removes `metadata`, unsupported beta flags, unsupported advisor/tool-search server tools, and advanced tool-only properties. This degrades those unavailable features instead of failing the entire Bedrock fallback request.
 - Exposes authenticated status at `GET /v0/management/plugins/quota-router/status`.
 
 ## Security

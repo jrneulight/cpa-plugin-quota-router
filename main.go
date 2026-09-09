@@ -35,7 +35,7 @@ const (
 
 const disabledNearCutoffPercent = -1.0
 
-var pluginVersion = "0.6.1"
+var pluginVersion = "0.7.0"
 
 // Variable only so the C-shared integration test can inject a local fixture.
 var usageEndpoint = defaultUsageEndpoint

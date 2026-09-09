@@ -132,6 +132,12 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 			return errorEnvelope(decisionError.Code, decisionError.Message), nil
 		}
 		return okEnvelope(response)
+	case pluginabi.MethodRequestInterceptBefore, pluginabi.MethodRequestInterceptAfter:
+		var req pluginapi.RequestInterceptRequest
+		if err := json.Unmarshal(request, &req); err != nil {
+			return nil, fmt.Errorf("decode request interceptor request: %w", err)
+		}
+		return okEnvelope(activeRuntime.interceptRequest(req, method == pluginabi.MethodRequestInterceptAfter))
 	case pluginabi.MethodManagementRegister:
 		return okEnvelope(managementRegistration())
 	case pluginabi.MethodManagementHandle:

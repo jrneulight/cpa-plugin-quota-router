@@ -29,6 +29,7 @@ type rawPluginConfig struct {
 	PollInterval      string    `yaml:"poll-interval"`
 	NearPollInterval  string    `yaml:"near-cutoff-poll-interval"`
 	RequestTimeout    string    `yaml:"request-timeout"`
+	BedrockCompat     *bool     `yaml:"bedrock-compat"`
 }
 
 type pluginConfig struct {
@@ -42,6 +43,7 @@ type pluginConfig struct {
 	PollInterval      time.Duration
 	NearPollInterval  time.Duration
 	RequestTimeout    time.Duration
+	BedrockCompat     bool
 }
 
 type registration struct {
@@ -51,8 +53,9 @@ type registration struct {
 }
 
 type registrationCapabilities struct {
-	Scheduler     bool `json:"scheduler"`
-	ManagementAPI bool `json:"management_api"`
+	Scheduler          bool `json:"scheduler"`
+	RequestInterceptor bool `json:"request_interceptor"`
+	ManagementAPI      bool `json:"management_api"`
 }
 
 type managementRegistrationResponse struct {
@@ -94,6 +97,9 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 	}
 	if decoded.Enabled != nil {
 		cfg.Enabled = *decoded.Enabled
+	}
+	if decoded.BedrockCompat != nil {
+		cfg.BedrockCompat = *decoded.BedrockCompat
 	}
 	if decoded.ProtectedModels != nil {
 		protectedModels, err := normalizeProtectedModels(*decoded.ProtectedModels)
@@ -274,8 +280,13 @@ func pluginRegistration() registration {
 					Type:        pluginapi.ConfigFieldTypeString,
 					Description: "Anthropic usage request timeout as a Go duration. Default: 10s.",
 				},
+				{
+					Name:        "bedrock-compat",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Description: "Sanitize Claude Code-only metadata, beta flags, and unsupported server tools when the selected upstream is Amazon Bedrock. Default: false.",
+				},
 			},
 		},
-		Capabilities: registrationCapabilities{Scheduler: true, ManagementAPI: true},
+		Capabilities: registrationCapabilities{Scheduler: true, RequestInterceptor: true, ManagementAPI: true},
 	}
 }
