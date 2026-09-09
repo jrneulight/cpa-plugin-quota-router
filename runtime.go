@@ -58,6 +58,7 @@ func (r *pluginRuntime) applyConfig(cfg pluginConfig) {
 	r.lifecycleMu.Lock()
 	defer r.lifecycleMu.Unlock()
 
+	previous := r.loadedConfig()
 	r.config.Store(&cfg)
 	if !cfg.Enabled {
 		r.stopLocked()
@@ -74,20 +75,38 @@ func (r *pluginRuntime) applyConfig(cfg pluginConfig) {
 		r.log("info", "quota router refresh worker started", map[string]any{
 			"cutoff_percent_used": cfg.CutoffPercentUsed,
 			"protected_models":    cfg.ProtectedModels,
+			"protected_accounts":  cfg.ProtectedAccounts,
+			"usage_scope":         cfg.UsageScope,
+			"block_on_unknown":    cfg.BlockOnUnknown,
 			"minimum_refresh_age": cfg.PollInterval.String(),
 			"request_timeout":     cfg.RequestTimeout.String(),
 		})
 		return
 	}
-	if r.cache.empty() {
+	if r.cache.empty() || quotaSelectionChanged(previous, cfg) {
 		r.queueAllRefreshLocked()
 	}
 	r.log("info", "quota router configuration reloaded", map[string]any{
 		"cutoff_percent_used": cfg.CutoffPercentUsed,
 		"protected_models":    cfg.ProtectedModels,
+		"protected_accounts":  cfg.ProtectedAccounts,
+		"usage_scope":         cfg.UsageScope,
+		"block_on_unknown":    cfg.BlockOnUnknown,
 		"minimum_refresh_age": cfg.PollInterval.String(),
 		"request_timeout":     cfg.RequestTimeout.String(),
 	})
+}
+
+func quotaSelectionChanged(previous, current pluginConfig) bool {
+	if !strings.EqualFold(previous.UsageScope, current.UsageScope) || len(previous.ProtectedAccounts) != len(current.ProtectedAccounts) {
+		return true
+	}
+	for i := range previous.ProtectedAccounts {
+		if !strings.EqualFold(previous.ProtectedAccounts[i], current.ProtectedAccounts[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *pluginRuntime) shutdown() {
@@ -165,7 +184,7 @@ func (r *pluginRuntime) queueCandidateRefresh(authID string, cfg pluginConfig, n
 		r.refreshMu.Unlock()
 		return
 	}
-	if !r.cache.claimRefresh(authID, now, cfg.CutoffPercentUsed, cfg.PollInterval) {
+	if !r.cache.claimRefresh(authID, now, cfg.CutoffPercentUsed, cfg.PollInterval, cfg.UsageScope) {
 		r.refreshMu.Unlock()
 		return
 	}
@@ -265,6 +284,9 @@ func (r *pluginRuntime) refreshAuths(ctx context.Context, cfg pluginConfig, all 
 				continue
 			}
 		}
+		if !matchesProtectedAccount(auth, cfg.ProtectedAccounts) {
+			continue
+		}
 		r.pollAuth(ctx, auth, cfg)
 	}
 }
@@ -293,11 +315,17 @@ func (r *pluginRuntime) pollAuth(ctx context.Context, auth physicalClaudeAuth, c
 		}
 		return
 	}
-	r.cache.recordSuccess(auth.ID, result.WeeklyPercentUsed, result.ResetAt, r.now())
+	window, ok := selectUsageWindow(result, cfg.UsageScope)
+	if !ok {
+		r.recordPollFailure(auth.ID, pollErrorInvalidScope)
+		return
+	}
+	r.cache.recordSuccessScope(auth.ID, cfg.UsageScope, window.PercentUsed, window.ResetAt, r.now())
 	r.log("debug", "quota router quota refreshed", map[string]any{
 		"auth_id":             auth.ID,
-		"weekly_percent_used": result.WeeklyPercentUsed,
-		"blocked":             result.WeeklyPercentUsed >= cfg.CutoffPercentUsed,
+		"usage_scope":         cfg.UsageScope,
+		"weekly_percent_used": window.PercentUsed,
+		"blocked":             window.PercentUsed >= cfg.CutoffPercentUsed,
 	})
 }
 

@@ -11,6 +11,9 @@ type cutoffStatusResponse struct {
 	Enabled           bool                  `json:"enabled"`
 	ProtectedModels   []string              `json:"protected_models"`
 	CutoffPercentUsed float64               `json:"cutoff_percent_used"`
+	ProtectedAccounts []string              `json:"protected_accounts,omitempty"`
+	UsageScope        string                `json:"usage_scope"`
+	BlockOnUnknown    bool                  `json:"block_on_unknown"`
 	Accounts          []cutoffAccountStatus `json:"accounts"`
 }
 
@@ -18,9 +21,13 @@ type cutoffAccountStatus struct {
 	ID                string   `json:"id"`
 	AuthIndex         string   `json:"auth_index,omitempty"`
 	Name              string   `json:"name,omitempty"`
+	Email             string   `json:"email,omitempty"`
+	Protected         bool     `json:"protected"`
 	Known             bool     `json:"known"`
+	Fresh             bool     `json:"fresh"`
 	Blocked           bool     `json:"blocked"`
 	WeeklyPercentUsed *float64 `json:"weekly_percent_used,omitempty"`
+	UsageScope        string   `json:"usage_scope,omitempty"`
 	SampledAt         string   `json:"sampled_at,omitempty"`
 	ResetAt           string   `json:"reset_at,omitempty"`
 	LastErrorCategory string   `json:"last_error_category,omitempty"`
@@ -29,7 +36,10 @@ type cutoffAccountStatus struct {
 type quotaSample struct {
 	AuthIndex         string
 	Name              string
+	Email             string
+	Account           string
 	Identity          string
+	UsageScope        string
 	HasSample         bool
 	WeeklyPercentUsed float64
 	SampledAt         time.Time
@@ -42,8 +52,15 @@ func (s quotaSample) known(now time.Time) bool {
 	return s.HasSample && (s.ResetAt.IsZero() || now.Before(s.ResetAt))
 }
 
-func (s quotaSample) blocked(now time.Time, cutoff float64) bool {
+func (s quotaSample) blocked(now time.Time, cutoff float64, scope ...string) bool {
+	if len(scope) > 0 && !strings.EqualFold(s.UsageScope, scope[0]) {
+		return false
+	}
 	return s.known(now) && s.WeeklyPercentUsed >= cutoff
+}
+
+func (s quotaSample) fresh(now time.Time, maximumAge time.Duration, scope string) bool {
+	return s.known(now) && strings.EqualFold(s.UsageScope, scope) && !s.SampledAt.IsZero() && !now.After(s.SampledAt.Add(maximumAge))
 }
 
 type quotaCache struct {
@@ -71,6 +88,8 @@ func (c *quotaCache) reconcile(auths []physicalClaudeAuth) {
 		}
 		sample.AuthIndex = auth.AuthIndex
 		sample.Name = strings.TrimSpace(auth.Name)
+		sample.Email = strings.ToLower(strings.TrimSpace(auth.Email))
+		sample.Account = strings.ToLower(strings.TrimSpace(auth.Account))
 		sample.Identity = auth.Identity
 		c.samples[auth.ID] = sample
 	}
@@ -82,15 +101,20 @@ func (c *quotaCache) reconcile(auths []physicalClaudeAuth) {
 	c.mu.Unlock()
 }
 
-func (c *quotaCache) claimRefresh(authID string, now time.Time, cutoff float64, minimumAge time.Duration) bool {
+func (c *quotaCache) claimRefresh(authID string, now time.Time, cutoff float64, minimumAge time.Duration, usageScope ...string) bool {
 	if strings.TrimSpace(authID) == "" {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	sample := c.samples[authID]
-	if sample.blocked(now, cutoff) {
+	if sample.blocked(now, cutoff, usageScope...) {
 		return false
+	}
+	if len(usageScope) > 0 && !strings.EqualFold(sample.UsageScope, usageScope[0]) {
+		sample.LastAttemptAt = now
+		c.samples[authID] = sample
+		return true
 	}
 	lastCheck := sample.SampledAt
 	if sample.LastAttemptAt.After(lastCheck) {
@@ -116,6 +140,10 @@ func (c *quotaCache) recordAttempt(authID string, attemptedAt time.Time) {
 }
 
 func (c *quotaCache) recordSuccess(authID string, percentUsed float64, resetAt, sampledAt time.Time) {
+	c.recordSuccessScope(authID, defaultUsageScope, percentUsed, resetAt, sampledAt)
+}
+
+func (c *quotaCache) recordSuccessScope(authID, usageScope string, percentUsed float64, resetAt, sampledAt time.Time) {
 	if strings.TrimSpace(authID) == "" {
 		return
 	}
@@ -123,6 +151,7 @@ func (c *quotaCache) recordSuccess(authID string, percentUsed float64, resetAt, 
 	sample := c.samples[authID]
 	sample.HasSample = true
 	sample.WeeklyPercentUsed = percentUsed
+	sample.UsageScope = strings.ToLower(strings.TrimSpace(usageScope))
 	sample.SampledAt = sampledAt
 	sample.LastAttemptAt = sampledAt
 	sample.ResetAt = resetAt
@@ -156,19 +185,25 @@ func (c *quotaCache) snapshot(authID string) quotaSample {
 	return sample
 }
 
-func (c *quotaCache) statuses(now time.Time, cutoff float64) []cutoffAccountStatus {
+func (c *quotaCache) statuses(now time.Time, cfg pluginConfig) []cutoffAccountStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	accounts := make([]cutoffAccountStatus, 0, len(c.samples))
 	for authID, sample := range c.samples {
-		known := sample.known(now)
+		known := sample.known(now) && strings.EqualFold(sample.UsageScope, cfg.UsageScope)
+		protected := matchesProtectedAccount(physicalClaudeAuth{ID: authID, AuthIndex: sample.AuthIndex, Name: sample.Name, Email: sample.Email, Account: sample.Account}, cfg.ProtectedAccounts)
+		fresh := sample.fresh(now, cfg.PollInterval, cfg.UsageScope)
 		account := cutoffAccountStatus{
 			ID:                authID,
 			AuthIndex:         sample.AuthIndex,
 			Name:              sample.Name,
+			Email:             sample.Email,
+			Protected:         protected,
 			Known:             known,
-			Blocked:           sample.blocked(now, cutoff),
+			Fresh:             fresh,
+			Blocked:           sample.blocked(now, cfg.CutoffPercentUsed, cfg.UsageScope) || (protected && cfg.BlockOnUnknown && !fresh),
+			UsageScope:        sample.UsageScope,
 			LastErrorCategory: sample.LastErrorCategory,
 		}
 		if known {

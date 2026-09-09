@@ -1,4 +1,4 @@
-module github.com/Smarty-Pants-Inc/cpa-plugin-quota-router
+module github.com/jrneulight/cpa-plugin-quota-router
 
 go 1.26.0
 

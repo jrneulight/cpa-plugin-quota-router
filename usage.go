@@ -14,6 +14,12 @@ import (
 type usageResult struct {
 	WeeklyPercentUsed float64
 	ResetAt           time.Time
+	ScopedWeekly      map[string]usageWindowResult
+}
+
+type usageWindowResult struct {
+	PercentUsed float64
+	ResetAt     time.Time
 }
 
 type usageFetcher func(context.Context, string, time.Duration) (usageResult, string)
@@ -40,11 +46,27 @@ func newHTTPUsageFetcher(endpoint string, transport http.RoundTripper) httpUsage
 
 type usageResponse struct {
 	SevenDay *usageWindow `json:"seven_day"`
+	Limits   []usageLimit `json:"limits"`
 }
 
 type usageWindow struct {
 	Utilization *float64        `json:"utilization"`
 	ResetsAt    json.RawMessage `json:"resets_at"`
+}
+
+type usageLimit struct {
+	Kind     string          `json:"kind"`
+	Percent  *float64        `json:"percent"`
+	ResetsAt json.RawMessage `json:"resets_at"`
+	Scope    *usageScope     `json:"scope"`
+}
+
+type usageScope struct {
+	Model *usageScopeModel `json:"model"`
+}
+
+type usageScopeModel struct {
+	DisplayName string `json:"display_name"`
 }
 
 func (f httpUsageFetcher) fetch(ctx context.Context, token string, timeout time.Duration) (usageResult, string) {
@@ -106,18 +128,47 @@ func (f httpUsageFetcher) fetch(ctx context.Context, token string, timeout time.
 	if json.Unmarshal(body, &payload) != nil {
 		return usageResult{}, pollErrorInvalidJSON
 	}
-	if payload.SevenDay == nil {
+	result := usageResult{
+		ScopedWeekly: make(map[string]usageWindowResult),
+	}
+	validSevenDay := false
+	if payload.SevenDay != nil {
+		percentUsed, validPercent := normalizeWeeklyPercent(payload.SevenDay.Utilization)
+		resetAt, validReset := parseResetTime(payload.SevenDay.ResetsAt)
+		if validPercent && validReset {
+			result.WeeklyPercentUsed = percentUsed
+			result.ResetAt = resetAt
+			validSevenDay = true
+		}
+	}
+	for _, limit := range payload.Limits {
+		if !strings.EqualFold(strings.TrimSpace(limit.Kind), "weekly_scoped") || limit.Scope == nil || limit.Scope.Model == nil {
+			continue
+		}
+		name := strings.ToLower(strings.TrimSpace(limit.Scope.Model.DisplayName))
+		if name == "" {
+			continue
+		}
+		percent, validPercent := normalizeWeeklyPercent(limit.Percent)
+		reset, validReset := parseResetTime(limit.ResetsAt)
+		if !validPercent || !validReset {
+			continue
+		}
+		result.ScopedWeekly[name] = usageWindowResult{PercentUsed: percent, ResetAt: reset}
+	}
+	if !validSevenDay && len(result.ScopedWeekly) == 0 {
 		return usageResult{}, pollErrorInvalidWeekly
 	}
-	percentUsed, ok := normalizeWeeklyPercent(payload.SevenDay.Utilization)
-	if !ok {
-		return usageResult{}, pollErrorInvalidWeekly
+	return result, ""
+}
+
+func selectUsageWindow(result usageResult, scope string) (usageWindowResult, bool) {
+	scope = strings.ToLower(strings.TrimSpace(scope))
+	if scope == "" || scope == defaultUsageScope {
+		return usageWindowResult{PercentUsed: result.WeeklyPercentUsed, ResetAt: result.ResetAt}, !result.ResetAt.IsZero()
 	}
-	resetAt, ok := parseResetTime(payload.SevenDay.ResetsAt)
-	if !ok {
-		return usageResult{}, pollErrorInvalidWeekly
-	}
-	return usageResult{WeeklyPercentUsed: percentUsed, ResetAt: resetAt}, ""
+	window, ok := result.ScopedWeekly[scope]
+	return window, ok && !window.ResetAt.IsZero()
 }
 
 // Anthropic reports percentage points: 1.0 means 1%, not 100%.

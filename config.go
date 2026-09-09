@@ -21,6 +21,9 @@ type lifecycleRequest struct {
 type rawPluginConfig struct {
 	Enabled           *bool     `yaml:"enabled"`
 	ProtectedModels   *[]string `yaml:"protected-models"`
+	ProtectedAccounts *[]string `yaml:"protected-accounts"`
+	UsageScope        string    `yaml:"usage-scope"`
+	BlockOnUnknown    *bool     `yaml:"block-on-unknown"`
 	CutoffPercentUsed *float64  `yaml:"cutoff-percent-used"`
 	PollInterval      string    `yaml:"poll-interval"`
 	RequestTimeout    string    `yaml:"request-timeout"`
@@ -29,6 +32,9 @@ type rawPluginConfig struct {
 type pluginConfig struct {
 	Enabled           bool
 	ProtectedModels   []string
+	ProtectedAccounts []string
+	UsageScope        string
+	BlockOnUnknown    bool
 	CutoffPercentUsed float64
 	PollInterval      time.Duration
 	RequestTimeout    time.Duration
@@ -58,6 +64,7 @@ func defaultPluginConfig() pluginConfig {
 	return pluginConfig{
 		Enabled:           true,
 		ProtectedModels:   []string{defaultProtectedModel},
+		UsageScope:        defaultUsageScope,
 		CutoffPercentUsed: defaultCutoffPercentUsed,
 		PollInterval:      defaultPollInterval,
 		RequestTimeout:    defaultRequestTimeout,
@@ -89,6 +96,19 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 		}
 		cfg.ProtectedModels = protectedModels
 	}
+	if decoded.ProtectedAccounts != nil {
+		protectedAccounts, err := normalizeProtectedAccounts(*decoded.ProtectedAccounts)
+		if err != nil {
+			return pluginConfig{}, err
+		}
+		cfg.ProtectedAccounts = protectedAccounts
+	}
+	if value := strings.TrimSpace(decoded.UsageScope); value != "" {
+		cfg.UsageScope = strings.ToLower(value)
+	}
+	if decoded.BlockOnUnknown != nil {
+		cfg.BlockOnUnknown = *decoded.BlockOnUnknown
+	}
 	if decoded.CutoffPercentUsed != nil {
 		cfg.CutoffPercentUsed = *decoded.CutoffPercentUsed
 	}
@@ -115,7 +135,28 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 	if cfg.RequestTimeout <= 0 {
 		return pluginConfig{}, fmt.Errorf("request-timeout must be greater than zero")
 	}
+	if cfg.UsageScope == "" {
+		return pluginConfig{}, fmt.Errorf("usage-scope must not be empty")
+	}
 	return cfg, nil
+}
+
+func normalizeProtectedAccounts(accounts []string) ([]string, error) {
+	normalized := make([]string, 0, len(accounts))
+	seen := make(map[string]struct{}, len(accounts))
+	for _, account := range accounts {
+		account = strings.ToLower(strings.TrimSpace(account))
+		if account == "" {
+			return nil, fmt.Errorf("protected-accounts must not contain empty selectors")
+		}
+		if _, exists := seen[account]; exists {
+			continue
+		}
+		seen[account] = struct{}{}
+		normalized = append(normalized, account)
+	}
+	sort.Strings(normalized)
+	return normalized, nil
 }
 
 func normalizeProtectedModels(models []string) ([]string, error) {
@@ -152,8 +193,8 @@ func pluginRegistration() registration {
 		Metadata: pluginapi.Metadata{
 			Name:             pluginName,
 			Version:          pluginVersion,
-			Author:           "Smarty Pants Inc",
-			GitHubRepository: "https://github.com/Smarty-Pants-Inc/cpa-plugin-quota-router",
+			Author:           "Smarty Pants Inc; scoped-account fork by jrneulight",
+			GitHubRepository: "https://github.com/jrneulight/cpa-plugin-quota-router",
 			ConfigFields: []pluginapi.ConfigField{
 				{
 					Name:        "protected-models",
@@ -161,9 +202,24 @@ func pluginRegistration() registration {
 					Description: "Exact Claude model IDs whose routing is paused at the weekly cutoff. Default: [claude-fable-5].",
 				},
 				{
+					Name:        "protected-accounts",
+					Type:        pluginapi.ConfigFieldTypeArray,
+					Description: "Exact auth ID, auth index, file name, email, or account selectors governed by the cutoff. Empty protects all Claude OAuth accounts.",
+				},
+				{
+					Name:        "usage-scope",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "Anthropic weekly usage scope: seven_day or an exact weekly_scoped model display name such as fable. Default: seven_day.",
+				},
+				{
+					Name:        "block-on-unknown",
+					Type:        pluginapi.ConfigFieldTypeBoolean,
+					Description: "Treat missing, expired, or stale quota data as blocked for protected accounts. Default: false.",
+				},
+				{
 					Name:        "cutoff-percent-used",
 					Type:        pluginapi.ConfigFieldTypeNumber,
-					Description: "Blocks a Claude auth when seven_day utilization reaches this percent used. Default: 50.",
+					Description: "Blocks a protected Claude auth when the selected usage scope reaches this percent used. Default: 50.",
 				},
 				{
 					Name:        "poll-interval",

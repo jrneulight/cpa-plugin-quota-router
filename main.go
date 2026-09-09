@@ -6,6 +6,7 @@ const (
 	pluginName               = "quota-router"
 	defaultCutoffPercentUsed = 50.0
 	defaultProtectedModel    = "claude-fable-5"
+	defaultUsageScope        = "seven_day"
 	defaultPollInterval      = 5 * time.Minute
 	defaultRequestTimeout    = 10 * time.Second
 	defaultUsageEndpoint     = "https://api.anthropic.com/api/oauth/usage"
@@ -17,6 +18,7 @@ const (
 	pollErrorAuthGet         = "auth_get"
 	pollErrorMissingToken    = "missing_token"
 	pollErrorInvalidWeekly   = "invalid_weekly"
+	pollErrorInvalidScope    = "invalid_scope"
 	pollErrorInvalidJSON     = "invalid_json"
 	pollErrorBodyTooLarge    = "body_too_large"
 	pollErrorTimeout         = "timeout"
@@ -30,7 +32,7 @@ const (
 	pollErrorRead            = "read_error"
 )
 
-var pluginVersion = "0.5.0"
+var pluginVersion = "0.6.0"
 
 // Variable only so the C-shared integration test can inject a local fixture.
 var usageEndpoint = defaultUsageEndpoint

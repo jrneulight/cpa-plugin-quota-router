@@ -332,6 +332,54 @@ func TestActualEndpointUtilizationScaleIsPercentPoints(t *testing.T) {
 	}
 }
 
+func TestFableScopedUsageIsSelectedInsteadOfOverallSevenDay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"seven_day":{"utilization":8,"resets_at":"2026-09-14T00:00:00Z"},
+			"limits":[
+				{"kind":"session","percent":39,"resets_at":"2026-09-09T18:00:00Z"},
+				{"kind":"weekly_all","percent":8,"resets_at":"2026-09-14T00:00:00Z"},
+				{"kind":"weekly_scoped","percent":16,"resets_at":"2026-09-14T00:00:00Z","scope":{"model":{"display_name":"Fable"}}}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	fetcher := newHTTPUsageFetcher(server.URL, server.Client().Transport)
+	result, category := fetcher.fetch(context.Background(), "fixture-token", time.Second)
+	if category != "" {
+		t.Fatalf("fetch category = %q", category)
+	}
+	overall, okOverall := selectUsageWindow(result, "seven_day")
+	fable, okFable := selectUsageWindow(result, "FABLE")
+	if !okOverall || overall.PercentUsed != 8 {
+		t.Fatalf("overall window = %#v, ok=%v", overall, okOverall)
+	}
+	if !okFable || fable.PercentUsed != 16 || fable.ResetAt.Format(time.RFC3339) != "2026-09-14T00:00:00Z" {
+		t.Fatalf("fable window = %#v, ok=%v", fable, okFable)
+	}
+}
+
+func TestFableScopedUsageDoesNotRequireLegacySevenDayField(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"limits":[{"kind":"weekly_scoped","percent":24,"resets_at":"2026-09-14T00:00:00Z","scope":{"model":{"display_name":"Fable"}}}]}`))
+	}))
+	defer server.Close()
+
+	fetcher := newHTTPUsageFetcher(server.URL, server.Client().Transport)
+	result, category := fetcher.fetch(context.Background(), "fixture-token", time.Second)
+	if category != "" {
+		t.Fatalf("fetch category = %q", category)
+	}
+	fable, ok := selectUsageWindow(result, "fable")
+	if !ok || fable.PercentUsed != 24 {
+		t.Fatalf("fable window = %#v, ok=%v", fable, ok)
+	}
+	if _, ok := selectUsageWindow(result, "seven_day"); ok {
+		t.Fatal("missing seven_day field unexpectedly became valid")
+	}
+}
+
 func TestMalformedOrMissingWeeklyQuotaFailsOpen(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -551,6 +599,105 @@ func TestUnknownSampleFailsOpen(t *testing.T) {
 	response, decisionError := runtime.pick(claudeRequest(candidate("unknown", 0)))
 	if decisionError != nil || response.AuthID != "unknown" || !response.Handled {
 		t.Fatalf("response = %#v, error = %#v", response, decisionError)
+	}
+}
+
+func TestProtectedAccountUsesFableScopeAndPreservesNativeRoutingWhenEligible(t *testing.T) {
+	now := time.Now().UTC()
+	runtime := newTestRuntime(&fakeHost{}, nil, now)
+	dad := physicalClaudeAuth{ID: "dad-auth", AuthIndex: "dad-index", Name: "claude-charles@example.com.json", Email: "charles@example.com"}
+	runtime.cache.reconcile([]physicalClaudeAuth{dad})
+
+	cfg := defaultPluginConfig()
+	cfg.ProtectedModels = []string{"claude-fable-5-1"}
+	cfg.ProtectedAccounts = []string{"charles@example.com"}
+	cfg.UsageScope = "fable"
+	cfg.BlockOnUnknown = true
+	cfg.CutoffPercentUsed = 75
+	cfg.PollInterval = time.Minute
+	runtime.config.Store(&cfg)
+
+	// Overall weekly usage must not control the Fable-specific policy.
+	runtime.cache.recordSuccessScope("dad-auth", "seven_day", 90, now.Add(time.Hour), now)
+	response, decisionError := runtime.pick(claudeModelRequest("claude-fable-5-1",
+		candidate("dad-auth", -50), candidate("bedrock", -100)))
+	if decisionError != nil || !response.Handled || response.AuthID != "bedrock" {
+		t.Fatalf("wrong-scope sample should fail closed to Bedrock: response=%#v error=%#v", response, decisionError)
+	}
+
+	// A fresh Fable sample below the cutoff leaves selection to CLIProxyAPI's native scheduler.
+	runtime.cache.recordSuccessScope("dad-auth", "fable", 16, now.Add(time.Hour), now)
+	response, decisionError = runtime.pick(claudeModelRequest("claude-fable-5-1",
+		candidate("dad-auth", -50), candidate("bedrock", -100)))
+	if decisionError != nil || response.Handled {
+		t.Fatalf("eligible Dad account should preserve native routing: response=%#v error=%#v", response, decisionError)
+	}
+
+	// At the 75%% boundary, Dad is excluded and the lower-priority fallback is selected.
+	runtime.cache.recordSuccessScope("dad-auth", "fable", 75, now.Add(time.Hour), now)
+	response, decisionError = runtime.pick(claudeModelRequest("claude-fable-5-1",
+		candidate("dad-auth", -50), candidate("bedrock", -100)))
+	if decisionError != nil || !response.Handled || response.AuthID != "bedrock" {
+		t.Fatalf("Fable cutoff should route to Bedrock: response=%#v error=%#v", response, decisionError)
+	}
+}
+
+func TestProtectedAccountSelectorDoesNotAffectOtherClaudeAccounts(t *testing.T) {
+	now := time.Now().UTC()
+	runtime := newTestRuntime(&fakeHost{}, nil, now)
+	runtime.cache.reconcile([]physicalClaudeAuth{
+		{ID: "primary", AuthIndex: "primary-index", Email: "owner@example.com"},
+		{ID: "dad", AuthIndex: "dad-index", Email: "dad@example.com"},
+	})
+	cfg := defaultPluginConfig()
+	cfg.ProtectedAccounts = []string{"dad@example.com"}
+	cfg.UsageScope = "fable"
+	cfg.BlockOnUnknown = true
+	cfg.CutoffPercentUsed = 75
+	cfg.PollInterval = time.Minute
+	runtime.config.Store(&cfg)
+	runtime.cache.recordSuccessScope("dad", "fable", 80, now.Add(time.Hour), now)
+
+	response, decisionError := runtime.pick(claudeRequest(candidate("primary", 0), candidate("dad", -50), candidate("bedrock", -100)))
+	if decisionError != nil || !response.Handled || response.AuthID != "primary" {
+		t.Fatalf("non-protected primary should remain eligible: response=%#v error=%#v", response, decisionError)
+	}
+}
+
+func TestOnlySelectedProtectedAccountIsPolled(t *testing.T) {
+	now := time.Now().UTC()
+	dadEntry := physicalEntry("dad", "dad-index")
+	dadEntry.Email = "dad@example.com"
+	ownerEntry := physicalEntry("owner", "owner-index")
+	ownerEntry.Email = "owner@example.com"
+	host := &fakeHost{
+		entries: []pluginapi.HostAuthFileEntry{ownerEntry, dadEntry},
+		authJSON: map[string]json.RawMessage{
+			"dad-index":   credentialJSON("dad-token"),
+			"owner-index": credentialJSON("owner-token"),
+		},
+	}
+	fetcher := &fakeFetcher{replies: map[string][]fetchReply{
+		"dad-token": {{result: usageResult{
+			WeeklyPercentUsed: 8,
+			ResetAt:           now.Add(time.Hour),
+			ScopedWeekly: map[string]usageWindowResult{
+				"fable": {PercentUsed: 16, ResetAt: now.Add(time.Hour)},
+			},
+		}}},
+	}}
+	cfg := defaultPluginConfig()
+	cfg.ProtectedAccounts = []string{"dad@example.com"}
+	cfg.UsageScope = "fable"
+	runtime := newTestRuntime(host, fetcher.fetch, now)
+	runtime.pollOnce(context.Background(), cfg)
+
+	if calls := fetcher.callTokens(); len(calls) != 1 || calls[0] != "dad-token" {
+		t.Fatalf("fetch calls = %#v, want Dad only", calls)
+	}
+	sample := runtime.cache.snapshot("dad")
+	if sample.UsageScope != "fable" || sample.WeeklyPercentUsed != 16 {
+		t.Fatalf("Dad sample = %#v", sample)
 	}
 }
 
@@ -1039,7 +1186,7 @@ func TestManagementStatusRouteExposesOnlySchedulerState(t *testing.T) {
 		t.Fatalf("raw accounts = %#v", rawStatus["accounts"])
 	}
 	allowedKeys := map[string]bool{
-		"id": true, "auth_index": true, "name": true, "known": true, "blocked": true,
+		"id": true, "auth_index": true, "name": true, "email": true, "protected": true, "usage_scope": true, "known": true, "fresh": true, "blocked": true,
 		"weekly_percent_used": true, "sampled_at": true, "reset_at": true, "last_error_category": true,
 	}
 	for _, rawAccount := range rawAccounts {
@@ -1091,7 +1238,7 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 	enabled := true
 	cutoff := 42.5
 	raw, errMarshal := json.Marshal(lifecycleRequest{ConfigYAML: []byte(
-		"enabled: true\nprotected-models: [claude-sonnet-4-6, CLAUDE-FABLE-5, claude-sonnet-4-6]\ncutoff-percent-used: 42.5\npoll-interval: 30s\nrequest-timeout: 2s\n",
+		"enabled: true\nprotected-models: [claude-sonnet-4-6, CLAUDE-FABLE-5, claude-sonnet-4-6]\nprotected-accounts: [Dad@Example.com, claude-dad.json]\nusage-scope: Fable\nblock-on-unknown: true\ncutoff-percent-used: 42.5\npoll-interval: 30s\nrequest-timeout: 2s\n",
 	)})
 	if errMarshal != nil {
 		t.Fatal(errMarshal)
@@ -1100,7 +1247,7 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 	if errConfig != nil {
 		t.Fatal(errConfig)
 	}
-	if cfg.Enabled != enabled || strings.Join(cfg.ProtectedModels, ",") != "claude-fable-5,claude-sonnet-4-6" || cfg.CutoffPercentUsed != cutoff || cfg.PollInterval != 30*time.Second || cfg.RequestTimeout != 2*time.Second {
+	if cfg.Enabled != enabled || strings.Join(cfg.ProtectedModels, ",") != "claude-fable-5,claude-sonnet-4-6" || strings.Join(cfg.ProtectedAccounts, ",") != "claude-dad.json,dad@example.com" || cfg.UsageScope != "fable" || !cfg.BlockOnUnknown || cfg.CutoffPercentUsed != cutoff || cfg.PollInterval != 30*time.Second || cfg.RequestTimeout != 2*time.Second {
 		t.Fatalf("config = %#v", cfg)
 	}
 	defaults, errDefaults := decodeLifecycleConfig([]byte("{}"))
@@ -1111,6 +1258,7 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 	for _, configYAML := range []string{
 		"protected-models: []\n",
 		"protected-models: ['']\n",
+		"protected-accounts: ['']\n",
 		"cutoff-percent-used: 101\n",
 		"cutoff-percent-used: -1\n",
 		"poll-interval: 0s\n",
@@ -1125,8 +1273,8 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 	registration := pluginRegistration()
 	if registration.Metadata.Name != pluginName ||
 		registration.Metadata.Version != pluginVersion ||
-		registration.Metadata.Author != "Smarty Pants Inc" ||
-		registration.Metadata.GitHubRepository != "https://github.com/Smarty-Pants-Inc/cpa-plugin-quota-router" ||
+		registration.Metadata.Author != "Smarty Pants Inc; scoped-account fork by jrneulight" ||
+		registration.Metadata.GitHubRepository != "https://github.com/jrneulight/cpa-plugin-quota-router" ||
 		!registration.Capabilities.Scheduler || !registration.Capabilities.ManagementAPI {
 		t.Fatalf("registration = %#v", registration)
 	}
@@ -1135,6 +1283,9 @@ func TestConfigValidationAndRegistrationMetadata(t *testing.T) {
 		fields[field.Name] = field.Type
 	}
 	if fields["protected-models"] != pluginapi.ConfigFieldTypeArray ||
+		fields["protected-accounts"] != pluginapi.ConfigFieldTypeArray ||
+		fields["usage-scope"] != pluginapi.ConfigFieldTypeString ||
+		fields["block-on-unknown"] != pluginapi.ConfigFieldTypeBoolean ||
 		fields["cutoff-percent-used"] != pluginapi.ConfigFieldTypeNumber ||
 		fields["poll-interval"] != pluginapi.ConfigFieldTypeString ||
 		fields["request-timeout"] != pluginapi.ConfigFieldTypeString {

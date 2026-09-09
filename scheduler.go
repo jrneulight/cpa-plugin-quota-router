@@ -14,6 +14,8 @@ type physicalClaudeAuth struct {
 	ID        string
 	AuthIndex string
 	Name      string
+	Email     string
+	Account   string
 	Identity  string
 }
 
@@ -35,11 +37,52 @@ func physicalClaudeAuths(entries []pluginapi.HostAuthFileEntry) []physicalClaude
 			ID:        entry.ID,
 			AuthIndex: entry.AuthIndex,
 			Name:      strings.TrimSpace(entry.Name),
+			Email:     strings.ToLower(strings.TrimSpace(entry.Email)),
+			Account:   strings.ToLower(strings.TrimSpace(entry.Account)),
 			Identity:  physicalAuthIdentity(entry),
 		})
 	}
 	sort.Slice(auths, func(i, j int) bool { return auths[i].ID < auths[j].ID })
 	return auths
+}
+
+func matchesProtectedAccount(auth physicalClaudeAuth, selectors []string) bool {
+	if len(selectors) == 0 {
+		return true
+	}
+	values := []string{auth.ID, auth.AuthIndex, auth.Name, auth.Email, auth.Account}
+	for _, selector := range selectors {
+		for _, value := range values {
+			if strings.EqualFold(strings.TrimSpace(selector), strings.TrimSpace(value)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func candidateMatchesProtectedAccount(candidate *pluginapi.SchedulerAuthCandidate, sample quotaSample, selectors []string) bool {
+	if candidate == nil {
+		return false
+	}
+	auth := physicalClaudeAuth{
+		ID: candidate.ID, AuthIndex: sample.AuthIndex, Name: sample.Name,
+		Email: sample.Email, Account: sample.Account,
+	}
+	if matchesProtectedAccount(auth, selectors) {
+		return true
+	}
+	for _, selector := range selectors {
+		for _, key := range []string{"email", "auth_index", "name", "file_name", "account"} {
+			if strings.EqualFold(strings.TrimSpace(selector), strings.TrimSpace(candidate.Attributes[key])) {
+				return true
+			}
+			if value, ok := candidate.Metadata[key].(string); ok && strings.EqualFold(strings.TrimSpace(selector), strings.TrimSpace(value)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func physicalAuthIdentity(entry pluginapi.HostAuthFileEntry) string {
@@ -71,7 +114,17 @@ func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Sche
 			continue
 		}
 		claudeCandidates++
-		if r.cache.isBlocked(candidate.ID, now, cfg.CutoffPercentUsed) {
+		sample := r.cache.snapshot(candidate.ID)
+		protected := candidateMatchesProtectedAccount(candidate, sample, cfg.ProtectedAccounts)
+		blocked := false
+		if protected {
+			fresh := sample.fresh(now, cfg.PollInterval, cfg.UsageScope)
+			if !fresh && len(cfg.ProtectedAccounts) > 0 {
+				r.queueCandidateRefresh(candidate.ID, cfg, now)
+			}
+			blocked = sample.blocked(now, cfg.CutoffPercentUsed, cfg.UsageScope) || (cfg.BlockOnUnknown && !fresh)
+		}
+		if blocked {
 			blockedCandidates++
 			continue
 		}
@@ -80,8 +133,13 @@ func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Sche
 			selected = candidate
 		}
 	}
+	if blockedCandidates == 0 && len(cfg.ProtectedAccounts) > 0 {
+		return pluginapi.SchedulerPickResponse{Handled: false}, nil
+	}
 	if selected != nil {
-		r.queueCandidateRefresh(selected.ID, cfg, now)
+		if len(cfg.ProtectedAccounts) == 0 {
+			r.queueCandidateRefresh(selected.ID, cfg, now)
+		}
 		return pluginapi.SchedulerPickResponse{AuthID: selected.ID, Handled: true}, nil
 	}
 	if claudeCandidates > 0 && blockedCandidates == claudeCandidates {
@@ -127,7 +185,10 @@ func (r *pluginRuntime) handleManagement(req pluginapi.ManagementRequest) plugin
 		Enabled:           cfg.Enabled,
 		CutoffPercentUsed: cfg.CutoffPercentUsed,
 		ProtectedModels:   cfg.ProtectedModels,
-		Accounts:          r.cache.statuses(r.now(), cfg.CutoffPercentUsed),
+		ProtectedAccounts: cfg.ProtectedAccounts,
+		UsageScope:        cfg.UsageScope,
+		BlockOnUnknown:    cfg.BlockOnUnknown,
+		Accounts:          r.cache.statuses(r.now(), cfg),
 	})
 	return pluginapi.ManagementResponse{
 		StatusCode: http.StatusOK,
