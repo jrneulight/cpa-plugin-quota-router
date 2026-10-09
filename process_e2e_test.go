@@ -192,13 +192,19 @@ plugins:
 	if bytes.Contains(unprotectedResponse, []byte(exhaustedErrorCode)) {
 		t.Fatalf("unprotected request was cutoff-blocked: %s", unprotectedResponse)
 	}
-	select {
-	case hit := <-proxyHits:
-		if !strings.Contains(hit, "api.anthropic.com:443") {
-			t.Fatalf("unexpected upstream proxy target: %s", hit)
+	// CLIProxyAPI v8 also reaches other hosts through proxy-url (its CLI
+	// updater checks registry.npmjs.org), so wait for the Anthropic hit itself.
+	upstreamDeadline := time.After(3 * time.Second)
+awaitAnthropicHit:
+	for {
+		select {
+		case hit := <-proxyHits:
+			if strings.Contains(hit, "api.anthropic.com:443") {
+				break awaitAnthropicHit
+			}
+		case <-upstreamDeadline:
+			t.Fatalf("unprotected request never reached upstream proxy: %s\nserver log:\n%s", unprotectedResponse, readLog(logPath))
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatalf("unprotected request never reached upstream proxy: %s\nserver log:\n%s", unprotectedResponse, readLog(logPath))
 	}
 drainProxyHits:
 	for {
@@ -282,7 +288,7 @@ drainProxyHits:
 
 func cliProxyAPIModuleDir(t *testing.T) string {
 	t.Helper()
-	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/router-for-me/CLIProxyAPI/v7")
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/router-for-me/CLIProxyAPI/v8")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("resolve CLIProxyAPI module: %v\n%s", err, output)
