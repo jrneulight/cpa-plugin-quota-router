@@ -15,6 +15,11 @@ type usageResult struct {
 	WeeklyPercentUsed float64
 	ResetAt           time.Time
 	ScopedWeekly      map[string]usageWindowResult
+	// Windows holds every window the usage endpoint reported, keyed by
+	// five_hour, seven_day or a lowercased weekly_scoped model display name.
+	// A zero ResetAt means the window has not started, as with an idle
+	// five-hour session.
+	Windows map[string]usageWindowResult
 }
 
 type usageWindowResult struct {
@@ -45,6 +50,7 @@ func newHTTPUsageFetcher(endpoint string, transport http.RoundTripper) httpUsage
 }
 
 type usageResponse struct {
+	FiveHour *usageWindow `json:"five_hour"`
 	SevenDay *usageWindow `json:"seven_day"`
 	Limits   []usageLimit `json:"limits"`
 }
@@ -130,6 +136,10 @@ func (f httpUsageFetcher) fetch(ctx context.Context, token string, timeout time.
 	}
 	result := usageResult{
 		ScopedWeekly: make(map[string]usageWindowResult),
+		Windows:      make(map[string]usageWindowResult),
+	}
+	if window, ok := parseUsageWindow(payload.FiveHour); ok {
+		result.Windows[fiveHourUsageScope] = window
 	}
 	validSevenDay := false
 	if payload.SevenDay != nil {
@@ -141,6 +151,9 @@ func (f httpUsageFetcher) fetch(ctx context.Context, token string, timeout time.
 			validSevenDay = true
 		}
 	}
+	if window, ok := parseUsageWindow(payload.SevenDay); ok {
+		result.Windows[defaultUsageScope] = window
+	}
 	for _, limit := range payload.Limits {
 		if !strings.EqualFold(strings.TrimSpace(limit.Kind), "weekly_scoped") || limit.Scope == nil || limit.Scope.Model == nil {
 			continue
@@ -150,8 +163,14 @@ func (f httpUsageFetcher) fetch(ctx context.Context, token string, timeout time.
 			continue
 		}
 		percent, validPercent := normalizeWeeklyPercent(limit.Percent)
+		if !validPercent {
+			continue
+		}
 		reset, validReset := parseResetTime(limit.ResetsAt)
-		if !validPercent || !validReset {
+		if _, seen := result.Windows[name]; !seen {
+			result.Windows[name] = usageWindowResult{PercentUsed: percent, ResetAt: reset}
+		}
+		if !validReset {
 			continue
 		}
 		result.ScopedWeekly[name] = usageWindowResult{PercentUsed: percent, ResetAt: reset}
@@ -169,6 +188,20 @@ func selectUsageWindow(result usageResult, scope string) (usageWindowResult, boo
 	}
 	window, ok := result.ScopedWeekly[scope]
 	return window, ok && !window.ResetAt.IsZero()
+}
+
+// parseUsageWindow keeps a window whose reset time is missing: Anthropic sends
+// a null resets_at for a window that has not started.
+func parseUsageWindow(window *usageWindow) (usageWindowResult, bool) {
+	if window == nil {
+		return usageWindowResult{}, false
+	}
+	percent, validPercent := normalizeWeeklyPercent(window.Utilization)
+	if !validPercent {
+		return usageWindowResult{}, false
+	}
+	reset, _ := parseResetTime(window.ResetsAt)
+	return usageWindowResult{PercentUsed: percent, ResetAt: reset}, true
 }
 
 // Anthropic reports percentage points: 1.0 means 1%, not 100%.

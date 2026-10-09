@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -242,7 +243,7 @@ func TestDisableClearsCachedQuota(t *testing.T) {
 	cfg := defaultPluginConfig()
 	cfg.Enabled = false
 	runtime.applyConfig(cfg)
-	if sample := runtime.cache.snapshot("auth-a"); sample != (quotaSample{}) {
+	if sample := runtime.cache.snapshot("auth-a"); !reflect.DeepEqual(sample, quotaSample{}) {
 		t.Fatalf("disabled cache = %#v", sample)
 	}
 }
@@ -846,7 +847,7 @@ func TestCachePrunesRemovedAuths(t *testing.T) {
 		{ID: "removed", AuthIndex: "removed-index"},
 	})
 	runtime.pollOnce(context.Background(), defaultPluginConfig())
-	if sample := runtime.cache.snapshot("removed"); sample != (quotaSample{}) {
+	if sample := runtime.cache.snapshot("removed"); !reflect.DeepEqual(sample, quotaSample{}) {
 		t.Fatalf("removed sample = %#v", sample)
 	}
 }
@@ -1129,7 +1130,7 @@ func TestDisableClearsInflightSuccess(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("disable did not finish")
 	}
-	if sample := runtime.cache.snapshot("auth-a"); sample != (quotaSample{}) {
+	if sample := runtime.cache.snapshot("auth-a"); !reflect.DeepEqual(sample, quotaSample{}) {
 		t.Fatalf("disabled cache retained in-flight success: %#v", sample)
 	}
 }

@@ -36,7 +36,13 @@ func (r *pluginRuntime) interceptRequest(req pluginapi.RequestInterceptRequest, 
 		return pluginapi.RequestInterceptResponse{}
 	}
 	cfg := r.loadedConfig()
-	if !cfg.Enabled || !cfg.BedrockCompat || !isBedrockClaudeModel(req.Model) {
+	if !cfg.Enabled {
+		return pluginapi.RequestInterceptResponse{}
+	}
+	if refusal, refused := r.enforceReserve(req, cfg); refused {
+		return refusal
+	}
+	if !cfg.BedrockCompat || !isBedrockClaudeModel(req.Model) {
 		return pluginapi.RequestInterceptResponse{}
 	}
 

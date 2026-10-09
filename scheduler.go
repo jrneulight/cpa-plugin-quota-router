@@ -98,6 +98,9 @@ func physicalAuthIdentity(entry pluginapi.HostAuthFileEntry) string {
 
 func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.SchedulerPickResponse, *envelopeError) {
 	cfg := r.loadedConfig()
+	if cfg.Enabled && isClaudeRequest(req) && len(cfg.Cutoffs) > 0 {
+		return r.pickWithCutoffs(req, cfg)
+	}
 	if !cfg.Enabled || !isClaudeRequest(req) || !isProtectedModel(req.Model, cfg.ProtectedModels) {
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil
 	}
@@ -191,6 +194,7 @@ func (r *pluginRuntime) handleManagement(req pluginapi.ManagementRequest) plugin
 		ProtectedAccounts:      cfg.ProtectedAccounts,
 		UsageScope:             cfg.UsageScope,
 		BlockOnUnknown:         cfg.BlockOnUnknown,
+		Cutoffs:                cutoffStatusRules(cfg.Cutoffs),
 		Accounts:               r.cache.statuses(r.now(), cfg),
 	})
 	return pluginapi.ManagementResponse{

@@ -19,17 +19,24 @@ type lifecycleRequest struct {
 }
 
 type rawPluginConfig struct {
-	Enabled           *bool     `yaml:"enabled"`
-	ProtectedModels   *[]string `yaml:"protected-models"`
-	ProtectedAccounts *[]string `yaml:"protected-accounts"`
-	UsageScope        string    `yaml:"usage-scope"`
-	BlockOnUnknown    *bool     `yaml:"block-on-unknown"`
-	CutoffPercentUsed *float64  `yaml:"cutoff-percent-used"`
-	NearCutoffPercent *float64  `yaml:"near-cutoff-percent-used"`
-	PollInterval      string    `yaml:"poll-interval"`
-	NearPollInterval  string    `yaml:"near-cutoff-poll-interval"`
-	RequestTimeout    string    `yaml:"request-timeout"`
-	BedrockCompat     *bool     `yaml:"bedrock-compat"`
+	Enabled           *bool            `yaml:"enabled"`
+	ProtectedModels   *[]string        `yaml:"protected-models"`
+	ProtectedAccounts *[]string        `yaml:"protected-accounts"`
+	UsageScope        string           `yaml:"usage-scope"`
+	BlockOnUnknown    *bool            `yaml:"block-on-unknown"`
+	CutoffPercentUsed *float64         `yaml:"cutoff-percent-used"`
+	NearCutoffPercent *float64         `yaml:"near-cutoff-percent-used"`
+	PollInterval      string           `yaml:"poll-interval"`
+	NearPollInterval  string           `yaml:"near-cutoff-poll-interval"`
+	RequestTimeout    string           `yaml:"request-timeout"`
+	BedrockCompat     *bool            `yaml:"bedrock-compat"`
+	Cutoffs           *[]rawCutoffRule `yaml:"cutoffs"`
+}
+
+type rawCutoffRule struct {
+	Scope       string   `yaml:"scope"`
+	PercentUsed *float64 `yaml:"percent-used"`
+	Models      []string `yaml:"models"`
 }
 
 type pluginConfig struct {
@@ -44,6 +51,17 @@ type pluginConfig struct {
 	NearPollInterval  time.Duration
 	RequestTimeout    time.Duration
 	BedrockCompat     bool
+	// Cutoffs, when set, replace the single usage-scope rule with one rule per
+	// usage window. Protected accounts are refused once any rule covering the
+	// requested model reaches its percent used.
+	Cutoffs []cutoffRule
+}
+
+type cutoffRule struct {
+	Scope       string
+	PercentUsed float64
+	// Models is nil when the rule covers every model.
+	Models []string
 }
 
 type registration struct {
@@ -154,9 +172,24 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 	if cfg.PollInterval <= 0 {
 		return pluginConfig{}, fmt.Errorf("poll-interval must be greater than zero")
 	}
+	if decoded.Cutoffs != nil {
+		cutoffs, err := normalizeCutoffRules(*decoded.Cutoffs)
+		if err != nil {
+			return pluginConfig{}, err
+		}
+		cfg.Cutoffs = cutoffs
+	}
 	if cfg.NearCutoffPercent != disabledNearCutoffPercent {
-		if math.IsNaN(cfg.NearCutoffPercent) || math.IsInf(cfg.NearCutoffPercent, 0) || cfg.NearCutoffPercent < 0 || cfg.NearCutoffPercent >= cfg.CutoffPercentUsed {
+		if math.IsNaN(cfg.NearCutoffPercent) || math.IsInf(cfg.NearCutoffPercent, 0) || cfg.NearCutoffPercent < 0 {
+			return pluginConfig{}, fmt.Errorf("near-cutoff-percent-used must be between 0 and 100")
+		}
+		if len(cfg.Cutoffs) == 0 && cfg.NearCutoffPercent >= cfg.CutoffPercentUsed {
 			return pluginConfig{}, fmt.Errorf("near-cutoff-percent-used must be below cutoff-percent-used")
+		}
+		for _, rule := range cfg.Cutoffs {
+			if cfg.NearCutoffPercent >= rule.PercentUsed {
+				return pluginConfig{}, fmt.Errorf("near-cutoff-percent-used must be below every cutoffs percent-used")
+			}
 		}
 		if cfg.NearPollInterval <= 0 || cfg.NearPollInterval > cfg.PollInterval {
 			return pluginConfig{}, fmt.Errorf("near-cutoff-poll-interval must be greater than zero and no longer than poll-interval")
@@ -178,6 +211,54 @@ func (cfg pluginConfig) refreshInterval(sample quotaSample) time.Duration {
 		return cfg.NearPollInterval
 	}
 	return cfg.PollInterval
+}
+
+func normalizeCutoffRules(raw []rawCutoffRule) ([]cutoffRule, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("cutoffs must contain at least one rule")
+	}
+	rules := make([]cutoffRule, 0, len(raw))
+	for _, item := range raw {
+		scope := strings.ToLower(strings.TrimSpace(item.Scope))
+		if scope == "" {
+			return nil, fmt.Errorf("cutoffs scope must not be empty")
+		}
+		if item.PercentUsed == nil {
+			return nil, fmt.Errorf("cutoffs %s needs percent-used", scope)
+		}
+		percent := *item.PercentUsed
+		if math.IsNaN(percent) || math.IsInf(percent, 0) || percent < 0 || percent > 100 {
+			return nil, fmt.Errorf("cutoffs %s percent-used must be between 0 and 100", scope)
+		}
+		var models []string
+		allModels := len(item.Models) == 0
+		for _, model := range item.Models {
+			if strings.TrimSpace(model) == allModelsSelector {
+				allModels = true
+			}
+		}
+		if !allModels {
+			normalized, err := normalizeProtectedModels(item.Models)
+			if err != nil {
+				return nil, fmt.Errorf("cutoffs %s models: %w", scope, err)
+			}
+			models = normalized
+		}
+		rules = append(rules, cutoffRule{Scope: scope, PercentUsed: percent, Models: models})
+	}
+	return rules, nil
+}
+
+func (rule cutoffRule) coversModel(models ...string) bool {
+	if rule.Models == nil {
+		return true
+	}
+	for _, model := range models {
+		if isProtectedModel(model, rule.Models) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeProtectedAccounts(accounts []string) ([]string, error) {
@@ -279,6 +360,11 @@ func pluginRegistration() registration {
 					Name:        "request-timeout",
 					Type:        pluginapi.ConfigFieldTypeString,
 					Description: "Anthropic usage request timeout as a Go duration. Default: 10s.",
+				},
+				{
+					Name:        "cutoffs",
+					Type:        pluginapi.ConfigFieldTypeArray,
+					Description: "Optional per-window rules ({scope, percent-used, models}) that replace usage-scope and cutoff-percent-used. scope is five_hour, seven_day or a weekly_scoped model name such as fable; models defaults to every model (\"*\"). Protected accounts are refused, before routing and after selection, once any rule covering the model is reached; with block-on-unknown a missing or stale reading also refuses.",
 				},
 				{
 					Name:        "bedrock-compat",
