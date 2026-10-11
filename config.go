@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +33,8 @@ type rawPluginConfig struct {
 	RequestTimeout    string           `yaml:"request-timeout"`
 	BedrockCompat     *bool            `yaml:"bedrock-compat"`
 	Cutoffs           *[]rawCutoffRule `yaml:"cutoffs"`
+	UsageSource       string           `yaml:"usage-source"`
+	SeatPacerFile     string           `yaml:"seat-pacer-file"`
 }
 
 type rawCutoffRule struct {
@@ -55,6 +59,12 @@ type pluginConfig struct {
 	// usage window. Protected accounts are refused once any rule covering the
 	// requested model reaches its percent used.
 	Cutoffs []cutoffRule
+	// UsageSource is usageSourceEndpoint, which polls Anthropic's usage
+	// endpoint, or usageSourceSeatPacerFile, which reads the readings the
+	// claude-seat-pacer plugin saves. SeatPacerFile is that file's path, with
+	// a leading ~/ already expanded.
+	UsageSource   string
+	SeatPacerFile string
 }
 
 type cutoffRule struct {
@@ -95,6 +105,8 @@ func defaultPluginConfig() pluginConfig {
 		PollInterval:      defaultPollInterval,
 		NearPollInterval:  defaultNearPollInterval,
 		RequestTimeout:    defaultRequestTimeout,
+		UsageSource:       usageSourceEndpoint,
+		SeatPacerFile:     defaultSeatPacerFile,
 	}
 }
 
@@ -201,7 +213,41 @@ func decodeLifecycleConfig(raw []byte) (pluginConfig, error) {
 	if cfg.UsageScope == "" {
 		return pluginConfig{}, fmt.Errorf("usage-scope must not be empty")
 	}
+	if value := strings.TrimSpace(decoded.UsageSource); value != "" {
+		cfg.UsageSource = strings.ToLower(value)
+	}
+	if value := strings.TrimSpace(decoded.SeatPacerFile); value != "" {
+		cfg.SeatPacerFile = value
+	}
+	switch cfg.UsageSource {
+	case usageSourceEndpoint:
+	case usageSourceSeatPacerFile:
+		if len(cfg.Cutoffs) == 0 {
+			return pluginConfig{}, fmt.Errorf("usage-source seat-pacer-file requires cutoffs")
+		}
+		path, err := expandHomePath(cfg.SeatPacerFile)
+		if err != nil {
+			return pluginConfig{}, err
+		}
+		cfg.SeatPacerFile = path
+	default:
+		return pluginConfig{}, fmt.Errorf("usage-source must be %s or %s", usageSourceEndpoint, usageSourceSeatPacerFile)
+	}
 	return cfg, nil
+}
+
+// expandHomePath resolves a leading ~/ against the user's home directory. A
+// relative path is left as it is, so it resolves against the host process's
+// working directory.
+func expandHomePath(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", fmt.Errorf("seat-pacer-file: cannot resolve ~ without a home directory")
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
 }
 
 func (cfg pluginConfig) refreshInterval(sample quotaSample) time.Duration {
@@ -365,6 +411,16 @@ func pluginRegistration() registration {
 					Name:        "cutoffs",
 					Type:        pluginapi.ConfigFieldTypeArray,
 					Description: "Optional per-window rules ({scope, percent-used, models}) that replace usage-scope and cutoff-percent-used. scope is five_hour, seven_day or a weekly_scoped model name such as fable; models defaults to every model (\"*\"). Protected accounts are refused, before routing and after selection, once any rule covering the model is reached; with block-on-unknown a missing or stale reading also refuses.",
+				},
+				{
+					Name:        "usage-source",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "Where protected-account usage readings come from: endpoint polls Anthropic's usage endpoint; seat-pacer-file reads the readings the claude-seat-pacer plugin saves and makes no request to Anthropic (requires cutoffs). Default: endpoint.",
+				},
+				{
+					Name:        "seat-pacer-file",
+					Type:        pluginapi.ConfigFieldTypeString,
+					Description: "Path of claude-seat-pacer's history.json, read when usage-source is seat-pacer-file. A leading ~/ is the user's home; a relative path resolves against CLIProxyAPI's working directory. Default: " + defaultSeatPacerFile + ".",
 				},
 				{
 					Name:        "bedrock-compat",

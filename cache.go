@@ -17,6 +17,8 @@ type cutoffStatusResponse struct {
 	ProtectedAccounts      []string              `json:"protected_accounts,omitempty"`
 	UsageScope             string                `json:"usage_scope"`
 	BlockOnUnknown         bool                  `json:"block_on_unknown"`
+	UsageSource            string                `json:"usage_source"`
+	SeatPacerFile          string                `json:"seat_pacer_file,omitempty"`
 	Cutoffs                []cutoffStatusRule    `json:"cutoffs,omitempty"`
 	Accounts               []cutoffAccountStatus `json:"accounts"`
 }
