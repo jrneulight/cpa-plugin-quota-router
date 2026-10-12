@@ -7,6 +7,9 @@ const (
 	defaultCutoffPercentUsed = 50.0
 	defaultProtectedModel    = "claude-fable-5"
 	defaultUsageScope        = "seven_day"
+	fiveHourUsageScope       = "five_hour"
+	allModelsSelector        = "*"
+	reserveErrorCode         = "quota_router_reserve"
 	defaultPollInterval      = 5 * time.Minute
 	defaultNearPollInterval  = time.Minute
 	defaultRequestTimeout    = 10 * time.Second
@@ -35,7 +38,7 @@ const (
 
 const disabledNearCutoffPercent = -1.0
 
-var pluginVersion = "0.7.0"
+var pluginVersion = "0.8.0"
 
 // Variable only so the C-shared integration test can inject a local fixture.
 var usageEndpoint = defaultUsageEndpoint

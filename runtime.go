@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
 type hostClient interface {
@@ -208,10 +208,26 @@ func (r *pluginRuntime) queueCandidateRefresh(authID string, cfg pluginConfig, n
 func (r *pluginRuntime) refreshLoop(ctx context.Context, wake <-chan struct{}, done chan<- struct{}) {
 	defer close(done)
 	for {
+		var tick <-chan time.Time
+		var timer *time.Timer
+		if interval := r.reserveRefreshInterval(r.loadedConfig()); interval > 0 {
+			timer = time.NewTimer(interval)
+			tick = timer.C
+		}
 		select {
 		case <-ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			return
 		case <-wake:
+		case <-tick:
+			r.refreshMu.Lock()
+			r.pendingAll = true
+			r.refreshMu.Unlock()
+		}
+		if timer != nil {
+			timer.Stop()
 		}
 		for {
 			all, authIDs := r.takePendingRefresh()
@@ -320,7 +336,20 @@ func (r *pluginRuntime) pollAuth(ctx context.Context, auth physicalClaudeAuth, c
 		}
 		return
 	}
+	if len(cfg.Cutoffs) > 0 {
+		r.cache.recordWindows(auth.ID, result.Windows, r.now())
+		verdict := cfg.reserveVerdictForAnyModel(r.cache.snapshot(auth.ID), r.now())
+		r.log("debug", "quota router reserve refreshed", map[string]any{
+			"auth_id":         auth.ID,
+			"reserve_refused": verdict.Refused,
+			"reserve_scope":   verdict.Scope,
+			"reserve_unknown": verdict.Unknown,
+		})
+	}
 	window, ok := selectUsageWindow(result, cfg.UsageScope)
+	if !ok && len(cfg.Cutoffs) > 0 {
+		return
+	}
 	if !ok {
 		r.recordPollFailure(auth.ID, pollErrorInvalidScope)
 		return

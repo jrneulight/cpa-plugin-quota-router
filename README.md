@@ -46,11 +46,12 @@ Published releases include Darwin (`amd64`, `arm64`), Linux (`amd64`, `arm64`), 
 | `poll-interval` | `5m` | Minimum cache age below the near-cutoff threshold. |
 | `near-cutoff-poll-interval` | `1m` | Minimum cache age at or above the near-cutoff threshold. |
 | `request-timeout` | `10s` | Timeout for the provider usage request, expressed as a Go duration. |
+| `cutoffs` | unset | Optional list of per-window rules that replaces `usage-scope`, `cutoff-percent-used` and `protected-models`. See [Per-window reserves](#per-window-reserves). |
 | `bedrock-compat` | `false` | After a Bedrock Claude model is selected, removes Claude-native metadata, unsupported beta flags, and unsupported advisor/tool-search features. Native Claude OAuth requests are unchanged. |
 
 ## Behavior
 
-- Refreshes enabled physical Claude OAuth credentials when the worker starts; startup reconfiguration retries discovery only while the cache is empty. There is no time-driven polling.
+- Refreshes enabled physical Claude OAuth credentials when the worker starts; startup reconfiguration retries discovery only while the cache is empty. There is no time-driven polling unless `cutoffs` is set.
 - With `protected-accounts` configured, native CLIProxyAPI scheduling is preserved while those accounts are eligible. If a protected account must be withheld, the plugin selects the highest-priority remaining candidate.
 - A protected-model request queues one asynchronous refresh when cached usage reaches the applicable normal or near-cutoff age. With `block-on-unknown: true`, that account is withheld while the refresh is pending.
 - Coalesces concurrent refreshes, and does not refresh a known blocked account again before its reported reset time.
@@ -60,6 +61,33 @@ Published releases include Darwin (`amd64`, `arm64`), Linux (`amd64`, `arm64`), 
 - Never changes auth files or CLIProxyAPI's permanent disabled state.
 - With `bedrock-compat: true`, request rewriting runs only after the selected upstream model has an Amazon Bedrock Anthropic prefix (`anthropic.`, `us.anthropic.`, `global.anthropic.`, `eu.anthropic.`, or `apac.anthropic.`). It removes `metadata`, unsupported beta flags, unsupported advisor/tool-search server tools, and advanced tool-only properties. This degrades those unavailable features instead of failing the entire Bedrock fallback request.
 - Exposes authenticated status at `GET /v0/management/plugins/quota-router/status`.
+
+## Per-window reserves
+
+`cutoffs` holds back part of several usage windows on the protected accounts at once. Each rule names a window, the percent used at which the account is refused, and the models it covers:
+
+```yaml
+quota-router:
+  enabled: true
+  protected-accounts: [charles@example.com]
+  block-on-unknown: true          # refuse when the reading is missing or stale
+  poll-interval: 2m
+  near-cutoff-percent-used: 60     # must sit below every cutoffs percent-used
+  near-cutoff-poll-interval: 1m
+  cutoffs:
+    - scope: five_hour             # keeps 30% of the 5-hour session
+      percent-used: 70
+    - scope: seven_day             # keeps 30% of the all-models week
+      percent-used: 70
+    - scope: fable                 # keeps 30% of the Fable week
+      percent-used: 70
+      models: [claude-fable-5, claude-fable-5-1]
+```
+
+- `scope` is `five_hour`, `seven_day`, or a `weekly_scoped` model display name such as `fable`. `models` defaults to every model; `"*"` says so explicitly.
+- A protected account is refused once **any** rule covering the requested model is at or above its `percent-used`. A window whose reset time has passed counts as reset. With `block-on-unknown: true`, a reading older than three `poll-interval`s, or a window the usage endpoint did not report, also refuses.
+- The reserve is enforced in two places. As the scheduler, the plugin skips refused protected accounts. After CLIProxyAPI has chosen an account, the request interceptor refuses a request routed to a refused protected account with `429 rate_limit_error` (code `quota_router_reserve`) and a `Retry-After` until the window resets. The second check is what holds when another plugin, such as a pacing scheduler, is the active scheduler: CLIProxyAPI consults only the highest-priority scheduler plugin.
+- While `cutoffs` is set, the worker re-reads the protected accounts every `poll-interval`, or `near-cutoff-poll-interval` once any window reaches `near-cutoff-percent-used`, because no scheduler pick may prompt it.
 
 ## Security
 

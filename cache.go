@@ -17,6 +17,7 @@ type cutoffStatusResponse struct {
 	ProtectedAccounts      []string              `json:"protected_accounts,omitempty"`
 	UsageScope             string                `json:"usage_scope"`
 	BlockOnUnknown         bool                  `json:"block_on_unknown"`
+	Cutoffs                []cutoffStatusRule    `json:"cutoffs,omitempty"`
 	Accounts               []cutoffAccountStatus `json:"accounts"`
 }
 
@@ -35,6 +36,12 @@ type cutoffAccountStatus struct {
 	SampledAt         string   `json:"sampled_at,omitempty"`
 	ResetAt           string   `json:"reset_at,omitempty"`
 	LastErrorCategory string   `json:"last_error_category,omitempty"`
+	// Windows, ReserveRefused and ReserveScope report cutoffs state. The
+	// verdict is the all-models one; a model-specific rule can refuse more.
+	Windows          map[string]windowStatus `json:"windows,omitempty"`
+	WindowsSampledAt string                  `json:"windows_sampled_at,omitempty"`
+	ReserveRefused   bool                    `json:"reserve_refused,omitempty"`
+	ReserveScope     string                  `json:"reserve_scope,omitempty"`
 }
 
 type quotaSample struct {
@@ -50,6 +57,10 @@ type quotaSample struct {
 	LastAttemptAt     time.Time
 	ResetAt           time.Time
 	LastErrorCategory string
+	// Windows and WindowsSampledAt carry the latest reading of every usage
+	// window, used by cutoffs rules.
+	Windows          map[string]usageWindowResult
+	WindowsSampledAt time.Time
 }
 
 func (s quotaSample) known(now time.Time) bool {
@@ -164,6 +175,34 @@ func (c *quotaCache) recordSuccessScope(authID, usageScope string, percentUsed f
 	c.mu.Unlock()
 }
 
+func (c *quotaCache) recordWindows(authID string, windows map[string]usageWindowResult, sampledAt time.Time) {
+	if strings.TrimSpace(authID) == "" {
+		return
+	}
+	copied := make(map[string]usageWindowResult, len(windows))
+	for scope, window := range windows {
+		copied[scope] = window
+	}
+	c.mu.Lock()
+	sample := c.samples[authID]
+	sample.Windows = copied
+	sample.WindowsSampledAt = sampledAt
+	sample.LastAttemptAt = sampledAt
+	sample.LastErrorCategory = ""
+	c.samples[authID] = sample
+	c.mu.Unlock()
+}
+
+func (c *quotaCache) samplesSnapshot() map[string]quotaSample {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]quotaSample, len(c.samples))
+	for authID, sample := range c.samples {
+		out[authID] = sample
+	}
+	return out
+}
+
 func (c *quotaCache) recordFailure(authID, category string) {
 	if strings.TrimSpace(authID) == "" {
 		return
@@ -211,6 +250,18 @@ func (c *quotaCache) statuses(now time.Time, cfg pluginConfig) []cutoffAccountSt
 			UsageScope:        sample.UsageScope,
 			RefreshInterval:   refreshInterval.String(),
 			LastErrorCategory: sample.LastErrorCategory,
+		}
+		if len(cfg.Cutoffs) > 0 {
+			account.Windows = windowStatuses(sample.Windows)
+			if !sample.WindowsSampledAt.IsZero() {
+				account.WindowsSampledAt = sample.WindowsSampledAt.UTC().Format(time.RFC3339Nano)
+			}
+			if protected {
+				verdict := cfg.reserveVerdictForAnyModel(sample, now)
+				account.ReserveRefused = verdict.Refused
+				account.ReserveScope = verdict.Scope
+				account.Blocked = verdict.Refused
+			}
 		}
 		if known {
 			percentUsed := sample.WeeklyPercentUsed

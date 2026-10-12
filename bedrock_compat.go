@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -36,7 +36,13 @@ func (r *pluginRuntime) interceptRequest(req pluginapi.RequestInterceptRequest, 
 		return pluginapi.RequestInterceptResponse{}
 	}
 	cfg := r.loadedConfig()
-	if !cfg.Enabled || !cfg.BedrockCompat || !isBedrockClaudeModel(req.Model) {
+	if !cfg.Enabled {
+		return pluginapi.RequestInterceptResponse{}
+	}
+	if refusal, refused := r.enforceReserve(req, cfg); refused {
+		return refusal
+	}
+	if !cfg.BedrockCompat || !isBedrockClaudeModel(req.Model) {
 		return pluginapi.RequestInterceptResponse{}
 	}
 
