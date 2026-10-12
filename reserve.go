@@ -94,7 +94,7 @@ func (r *pluginRuntime) enforceReserve(req pluginapi.RequestInterceptRequest, cf
 		return pluginapi.RequestInterceptResponse{}, false
 	}
 	if verdict.Unknown {
-		r.queueReserveRefresh()
+		r.queueUnknownReserveRefresh(cfg)
 	}
 	r.log("info", "quota router reserve refused request", map[string]any{
 		"auth_id":      authID,
@@ -161,6 +161,7 @@ func (r *pluginRuntime) pickWithCutoffs(req pluginapi.SchedulerPickRequest, cfg 
 	now := r.now()
 	var selected *pluginapi.SchedulerAuthCandidate
 	claudeCandidates, refused := 0, 0
+	unknown := false
 	for i := range req.Candidates {
 		candidate := &req.Candidates[i]
 		provider := strings.ToLower(strings.TrimSpace(candidate.Provider))
@@ -172,14 +173,22 @@ func (r *pluginRuntime) pickWithCutoffs(req pluginapi.SchedulerPickRequest, cfg 
 		}
 		claudeCandidates++
 		sample := r.cache.snapshot(candidate.ID)
-		if candidateMatchesProtectedAccount(candidate, sample, cfg.ProtectedAccounts) && cfg.reserveVerdict(sample, now, req.Model).Refused {
-			refused++
-			continue
+		if candidateMatchesProtectedAccount(candidate, sample, cfg.ProtectedAccounts) {
+			if verdict := cfg.reserveVerdict(sample, now, req.Model); verdict.Refused {
+				refused++
+				unknown = unknown || verdict.Unknown
+				continue
+			}
 		}
 		if selected == nil || candidate.Priority > selected.Priority ||
 			(candidate.Priority == selected.Priority && candidate.ID < selected.ID) {
 			selected = candidate
 		}
+	}
+	if unknown && cfg.UsageSource == usageSourceSeatPacerFile {
+		// Seat Pacer may have saved a newer reading since the last read.
+		// Endpoint mode leaves the refresh to the interceptor and the timer.
+		r.queueSeatPacerReread()
 	}
 	if refused == 0 {
 		return pluginapi.SchedulerPickResponse{Handled: false}, nil

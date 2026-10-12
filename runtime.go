@@ -37,6 +37,9 @@ type pluginRuntime struct {
 	pendingIDs  map[string]struct{}
 	inFlightAll bool
 	inFlightIDs map[string]struct{}
+	// seatPacerReadAt is when the worker last read Seat Pacer's file,
+	// guarded by refreshMu.
+	seatPacerReadAt time.Time
 }
 
 func newPluginRuntime(host hostClient, fetch usageFetcher, now func() time.Time) *pluginRuntime {
@@ -82,6 +85,7 @@ func (r *pluginRuntime) applyConfig(cfg pluginConfig) {
 			"near_cutoff_percent": cfg.NearCutoffPercent,
 			"near_refresh_age":    cfg.NearPollInterval.String(),
 			"request_timeout":     cfg.RequestTimeout.String(),
+			"usage_source":        cfg.UsageSource,
 		})
 		return
 	}
@@ -98,11 +102,13 @@ func (r *pluginRuntime) applyConfig(cfg pluginConfig) {
 		"near_cutoff_percent": cfg.NearCutoffPercent,
 		"near_refresh_age":    cfg.NearPollInterval.String(),
 		"request_timeout":     cfg.RequestTimeout.String(),
+		"usage_source":        cfg.UsageSource,
 	})
 }
 
 func quotaSelectionChanged(previous, current pluginConfig) bool {
-	if !strings.EqualFold(previous.UsageScope, current.UsageScope) || len(previous.ProtectedAccounts) != len(current.ProtectedAccounts) {
+	if !strings.EqualFold(previous.UsageScope, current.UsageScope) || len(previous.ProtectedAccounts) != len(current.ProtectedAccounts) ||
+		previous.UsageSource != current.UsageSource || previous.SeatPacerFile != current.SeatPacerFile {
 		return true
 	}
 	for i := range previous.ProtectedAccounts {
@@ -286,7 +292,14 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, cfg pluginConfig) {
 }
 
 func (r *pluginRuntime) refreshAuths(ctx context.Context, cfg pluginConfig, all bool, authIDs map[string]struct{}) {
-	if r == nil || r.host == nil || r.fetch == nil || ctx.Err() != nil {
+	if r == nil || r.host == nil || ctx.Err() != nil {
+		return
+	}
+	if cfg.UsageSource == usageSourceSeatPacerFile {
+		r.refreshFromSeatPacer(ctx, cfg, all, authIDs)
+		return
+	}
+	if r.fetch == nil {
 		return
 	}
 	entries, err := r.host.listAuth()
@@ -336,11 +349,18 @@ func (r *pluginRuntime) pollAuth(ctx context.Context, auth physicalClaudeAuth, c
 		}
 		return
 	}
+	now := r.now()
+	r.recordUsage(auth.ID, cfg, result, now, now)
+}
+
+// recordUsage stores a reading taken at sampledAt; now is the time the
+// reserve verdict in the debug log is judged at.
+func (r *pluginRuntime) recordUsage(authID string, cfg pluginConfig, result usageResult, sampledAt, now time.Time) {
 	if len(cfg.Cutoffs) > 0 {
-		r.cache.recordWindows(auth.ID, result.Windows, r.now())
-		verdict := cfg.reserveVerdictForAnyModel(r.cache.snapshot(auth.ID), r.now())
+		r.cache.recordWindows(authID, result.Windows, sampledAt)
+		verdict := cfg.reserveVerdictForAnyModel(r.cache.snapshot(authID), now)
 		r.log("debug", "quota router reserve refreshed", map[string]any{
-			"auth_id":         auth.ID,
+			"auth_id":         authID,
 			"reserve_refused": verdict.Refused,
 			"reserve_scope":   verdict.Scope,
 			"reserve_unknown": verdict.Unknown,
@@ -351,12 +371,12 @@ func (r *pluginRuntime) pollAuth(ctx context.Context, auth physicalClaudeAuth, c
 		return
 	}
 	if !ok {
-		r.recordPollFailure(auth.ID, pollErrorInvalidScope)
+		r.recordPollFailure(authID, pollErrorInvalidScope)
 		return
 	}
-	r.cache.recordSuccessScope(auth.ID, cfg.UsageScope, window.PercentUsed, window.ResetAt, r.now())
+	r.cache.recordSuccessScope(authID, cfg.UsageScope, window.PercentUsed, window.ResetAt, sampledAt)
 	r.log("debug", "quota router quota refreshed", map[string]any{
-		"auth_id":             auth.ID,
+		"auth_id":             authID,
 		"usage_scope":         cfg.UsageScope,
 		"weekly_percent_used": window.PercentUsed,
 		"blocked":             window.PercentUsed >= cfg.CutoffPercentUsed,

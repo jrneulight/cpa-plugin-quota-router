@@ -34,11 +34,25 @@ const (
 	pollErrorServer          = "server_error"
 	pollErrorHTTP            = "http_error"
 	pollErrorRead            = "read_error"
+
+	usageSourceEndpoint      = "endpoint"
+	usageSourceSeatPacerFile = "seat-pacer-file"
+	defaultSeatPacerFile     = "~/.cli-proxy-api/plugins/claude-seat-pacer/history.json"
+	maxSeatPacerFileBytes    = 4 << 20
+	// seatPacerMinReread spaces the file reads a refused request asks for, so
+	// a burst of refusals reads the file once.
+	seatPacerMinReread = 5 * time.Second
+
+	pollErrorSeatPacerFileMissing    = "seat_pacer_file_missing"
+	pollErrorSeatPacerFileUnreadable = "seat_pacer_file_unreadable"
+	pollErrorSeatPacerFileInvalid    = "seat_pacer_file_invalid"
+	pollErrorSeatPacerFileVersion    = "seat_pacer_file_version"
+	pollErrorSeatPacerNoReading      = "seat_pacer_no_reading"
 )
 
 const disabledNearCutoffPercent = -1.0
 
-var pluginVersion = "0.8.0"
+var pluginVersion = "0.9.0"
 
 // Variable only so the C-shared integration test can inject a local fixture.
 var usageEndpoint = defaultUsageEndpoint

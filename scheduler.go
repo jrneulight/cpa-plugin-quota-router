@@ -194,6 +194,8 @@ func (r *pluginRuntime) handleManagement(req pluginapi.ManagementRequest) plugin
 		ProtectedAccounts:      cfg.ProtectedAccounts,
 		UsageScope:             cfg.UsageScope,
 		BlockOnUnknown:         cfg.BlockOnUnknown,
+		UsageSource:            cfg.UsageSource,
+		SeatPacerFile:          statusSeatPacerFile(cfg),
 		Cutoffs:                cutoffStatusRules(cfg.Cutoffs),
 		Accounts:               r.cache.statuses(r.now(), cfg),
 	})
@@ -202,4 +204,11 @@ func (r *pluginRuntime) handleManagement(req pluginapi.ManagementRequest) plugin
 		Headers:    http.Header{"Content-Type": []string{"application/json; charset=utf-8"}},
 		Body:       body,
 	}
+}
+
+func statusSeatPacerFile(cfg pluginConfig) string {
+	if cfg.UsageSource != usageSourceSeatPacerFile {
+		return ""
+	}
+	return cfg.SeatPacerFile
 }

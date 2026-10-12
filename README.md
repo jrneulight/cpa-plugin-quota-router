@@ -47,6 +47,8 @@ Published releases include Darwin (`amd64`, `arm64`), Linux (`amd64`, `arm64`), 
 | `near-cutoff-poll-interval` | `1m` | Minimum cache age at or above the near-cutoff threshold. |
 | `request-timeout` | `10s` | Timeout for the provider usage request, expressed as a Go duration. |
 | `cutoffs` | unset | Optional list of per-window rules that replaces `usage-scope`, `cutoff-percent-used` and `protected-models`. See [Per-window reserves](#per-window-reserves). |
+| `usage-source` | `endpoint` | Where usage readings come from. `endpoint` polls Anthropic's usage endpoint with each protected account's token. `seat-pacer-file` reads the readings the claude-seat-pacer plugin saves and sends nothing to Anthropic; it requires `cutoffs`. See [Sharing Seat Pacer's readings](#sharing-seat-pacers-readings). |
+| `seat-pacer-file` | `~/.cli-proxy-api/plugins/claude-seat-pacer/history.json` | Seat Pacer's `history.json`, read when `usage-source` is `seat-pacer-file`. A leading `~/` is the home directory of the user running CLIProxyAPI; a relative path resolves against CLIProxyAPI's working directory, so prefer an absolute one. |
 | `bedrock-compat` | `false` | After a Bedrock Claude model is selected, removes Claude-native metadata, unsupported beta flags, and unsupported advisor/tool-search features. Native Claude OAuth requests are unchanged. |
 
 ## Behavior
@@ -89,10 +91,40 @@ quota-router:
 - The reserve is enforced in two places. As the scheduler, the plugin skips refused protected accounts. After CLIProxyAPI has chosen an account, the request interceptor refuses a request routed to a refused protected account with `429 rate_limit_error` (code `quota_router_reserve`) and a `Retry-After` until the window resets. The second check is what holds when another plugin, such as a pacing scheduler, is the active scheduler: CLIProxyAPI consults only the highest-priority scheduler plugin.
 - While `cutoffs` is set, the worker re-reads the protected accounts every `poll-interval`, or `near-cutoff-poll-interval` once any window reaches `near-cutoff-percent-used`, because no scheduler pick may prompt it.
 
+## Sharing Seat Pacer's readings
+
+[claude-seat-pacer](https://github.com/yuya-iwabuchi/cpa-plugin-claude-seat-pacer) already polls Anthropic's usage endpoint for every Claude account. When quota-router polls the same endpoint for the same account, Anthropic answers one of the two readers with `429`, quota-router's reading goes stale, and a strict reserve (`block-on-unknown: true`) refuses an account that has plenty left. One poller per account, with other readers sharing its saved reading, avoids the double read.
+
+```yaml
+quota-router:
+  enabled: true
+  protected-accounts: [charles@example.com]
+  block-on-unknown: true
+  usage-source: seat-pacer-file
+  seat-pacer-file: /Users/me/.cli-proxy-api/plugins/claude-seat-pacer/history.json
+  poll-interval: 5m
+  cutoffs:
+    - scope: five_hour
+      percent-used: 70
+    - scope: seven_day
+      percent-used: 70
+    - scope: fable
+      percent-used: 70
+      models: [claude-fable-5]
+```
+
+- quota-router makes no request to Anthropic and reads no credential. On the same cadence it would have polled (`poll-interval`, `near-cutoff-poll-interval`, and when a refused request finds a reading stale, at most once every 5s) it reads the file's `readings` and records each protected account's windows. It never writes the file.
+- Seat Pacer's 0..1 utilization becomes percent points; usage past a cap, or a window Anthropic is refusing (`status: rejected`), reads as 100%. `weekly_scoped` windows are keyed by their lowercased model name, so `Fable` is `fable`. Readings refreshed from response headers count the same as usage-endpoint ones.
+- A reading counts as taken at its own `observed_at`, not when quota-router read the file, so the reserve's staleness rule (three `poll-interval`s plus `request-timeout`) measures how old Seat Pacer's reading is.
+- A missing, unreadable, unparseable or unknown-version file, or no reading for an account, is recorded as `seat_pacer_file_missing`, `seat_pacer_file_unreadable`, `seat_pacer_file_invalid`, `seat_pacer_file_version` or `seat_pacer_no_reading` and logged at warn. The last good reading stays until it is stale; after that `block-on-unknown` decides, and strict refuses. Files over 4 MiB are refused.
+
+**Trade-off: the reserve is only as fresh as Seat Pacer's last reading.** Seat Pacer polls on its own `quota.poll-interval` (2m by default, slower when Anthropic throttles it) and keeps trusting a reading up to its `quota.max-staleness` (15m by default; often raised, for example to 45m). quota-router's reserve treats a reading older than `3 × poll-interval + request-timeout` as unknown — about 15m at the default `poll-interval: 5m`. If Seat Pacer polls an account less often than that, a strict reserve refuses the account between its polls. Set quota-router's `poll-interval` so `3 × poll-interval` covers Seat Pacer's poll cadence for idle accounts (for example `poll-interval: 15m`, about 45m of tolerance, against a Seat Pacer `max-staleness: 45m`), and accept that a cutoff can be overshot by whatever the account uses between two Seat Pacer readings. Seat Pacer also moves a reading's `observed_at` forward when response headers update some of its windows, so a window the headers do not carry, such as a model's weekly window, can be older than `observed_at` says.
+
 ## Security
 
 - Reads eligible Claude credentials through CLIProxyAPI's host API and never writes auth files.
 - Sends the access token only to Anthropic's fixed HTTPS usage endpoint and refuses redirects.
+- With `usage-source: seat-pacer-file`, reads no credential and sends nothing to Anthropic; it only reads Seat Pacer's file and never writes it or logs its contents.
 - Never logs access tokens, refresh tokens, or provider response bodies.
 - Exposes status only through CLIProxyAPI's authenticated Management API.
 

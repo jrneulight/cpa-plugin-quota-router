@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "seats": {
+    "claude-charles@example.com.json": [
+      {"kind": "seven_day", "cycles": [{"resets_at": "2026-10-13T21:59:59Z", "samples": [[1791750000, 0.01]]}]}
+    ]
+  },
+  "readings": {
+    "claude-charles@example.com.json": {
+      "observed_at": "2026-10-11T16:29:48.000288-04:00",
+      "source": "usage-endpoint",
+      "windows": [
+        {"kind": "five_hour", "scope": null, "utilization": 0, "resets_at": "0001-01-01T00:00:00Z", "duration": 18000000000000, "active": false},
+        {"kind": "seven_day", "scope": null, "utilization": 0.02, "resets_at": "2026-10-13T21:59:59Z", "duration": 604800000000000, "active": false},
+        {"kind": "weekly_scoped", "scope": "Fable", "utilization": 0.29, "resets_at": "2026-10-13T21:59:59Z", "duration": 604800000000000, "active": false},
+        {"kind": "weekly_scoped", "scope": "Opus", "utilization": 1.2, "resets_at": "2026-10-13T21:59:59Z", "duration": 604800000000000, "active": false},
+        {"kind": "weekly_scoped", "scope": "Sonnet", "utilization": 0.4, "resets_at": "2026-10-13T21:59:59Z", "duration": 604800000000000, "status": "rejected", "active": true},
+        {"kind": "weekly_scoped", "scope": "Fable", "utilization": 0.99, "resets_at": "2026-10-13T21:59:59Z", "duration": 604800000000000, "active": false},
+        {"kind": "overage", "scope": null, "utilization": 0.5, "resets_at": "2026-10-13T21:59:59Z", "duration": 0, "active": false}
+      ]
+    },
+    "claude-jacob@example.com.json": {
+      "observed_at": "2026-10-11T20:25:00Z",
+      "source": "response-headers",
+      "windows": [
+        {"kind": "five_hour", "utilization": 0.1, "resets_at": "2026-10-11T23:00:00Z", "duration": 18000000000000, "status": "allowed", "active": false},
+        {"kind": "seven_day", "utilization": 0.75, "resets_at": "2026-10-13T21:59:59Z", "duration": 604800000000000, "status": "allowed_warning", "active": true}
+      ]
+    }
+  }
+}
